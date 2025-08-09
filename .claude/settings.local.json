@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(npm run install:all:*)",
+      "Bash(npm run server:dev:*)"
+    ],
+    "deny": []
+  }
+}

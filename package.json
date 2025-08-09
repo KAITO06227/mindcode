@@ -1,0 +1,34 @@
+{
+  "name": "mindcode",
+  "version": "1.0.0",
+  "description": "MindCode - Educational Web IDE for Japanese students with Claude Code integration",
+  "main": "server/app.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "server:dev": "nodemon server/app.js",
+    "client:dev": "cd client && npm start",
+    "build": "cd client && npm run build",
+    "start": "node server/app.js",
+    "install:all": "npm install && cd client && npm install"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^7.4.0",
+    "mysql2": "^3.6.0",
+    "passport": "^0.6.0",
+    "passport-google-oauth20": "^2.0.0",
+    "express-session": "^1.17.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.7.2",
+    "jsonwebtoken": "^9.0.1",
+    "bcryptjs": "^2.4.3",
+    "node-pty": "^0.10.1",
+    "ws": "^8.13.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "concurrently": "^8.2.0"
+  }
+}
