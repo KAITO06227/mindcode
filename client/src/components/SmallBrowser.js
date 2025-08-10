@@ -120,6 +120,7 @@ const SmallBrowser = ({ projectId }) => {
   const [history, setHistory] = useState(['']);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [htmlContent, setHtmlContent] = useState('');
+  const [currentUrl, setCurrentUrl] = useState(''); // Track current preview URL like kenya.html
   const iframeRef = useRef(null);
 
   useEffect(() => {
@@ -225,6 +226,10 @@ const SmallBrowser = ({ projectId }) => {
 
         console.log('SmallBrowser: Setting HTML content:', htmlContent.length, 'characters');
         setHtmlContent(htmlContent);
+        
+        // Set current URL for new tab functionality (kenya.html style)
+        const previewUrl = `/api/projects/${projectId}/preview`;
+        setCurrentUrl(previewUrl);
       } else {
         setError('No index.html file found in project');
       }
@@ -314,19 +319,17 @@ const SmallBrowser = ({ projectId }) => {
     console.log('SmallBrowser: Manual refresh triggered');
     console.log('SmallBrowser: Current htmlContent:', htmlContent ? htmlContent.length : 'none');
     
-    // Always reload the project to get fresh content
+    // Kenya.html style: Reload project to get fresh content and update display
     loadProject();
   };
 
   const handleOpenInNewTab = () => {
+    // Use direct server URL to bypass React Router
     if (projectId) {
-      // Use server-side preview endpoint for persistent URL
-      const previewUrl = `/api/projects/${projectId}/preview`;
+      const previewUrl = `http://localhost:3001/api/projects/${projectId}/preview`;
       window.open(previewUrl, '_blank');
-    } else if (htmlContent) {
-      // Fallback to data URL
-      const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent);
-      window.open(dataUrl, '_blank');
+    } else {
+      console.warn('SmallBrowser: No project ID available');
     }
   };
 

@@ -163,24 +163,31 @@ DB_PASSWORD=password
 ```
 
 ## 開発コマンド
+
+**⚠️ 重要: サーバー起動について**
+- **Claude Codeはサーバーを起動してはいけません**
+- **npm run dev、docker compose upなど、サーバー起動コマンドは一切実行禁止**
+- **ユーザーがサーバーを起動・管理します**
+- Claude Codeの役割はコードの編集・修正・分析のみです
+
 ```bash
 # 全体のセットアップ
 npm run install:all
 
-# 開発サーバー起動（フロント・バックエンド同時）
-npm run dev
-
-# サーバーのみ起動
-npm run server:dev
-
-# クライアントのみ起動
-npm run client:dev
+# 🚫 禁止: Claude Codeによるサーバー起動
+# npm run dev
+# docker compose up
+# npm run server:dev
+# npm run client:dev
 
 # プロダクションビルド
 npm run build
 
-# Docker環境起動
-docker-compose up -d
+# ✅ Claude Codeが実行可能なコマンド
+# - ファイルの読み書き
+# - コードの分析・修正
+# - データベーススキーマの確認
+# - 設定ファイルの編集
 ```
 
 ## 特記事項

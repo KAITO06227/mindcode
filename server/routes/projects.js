@@ -151,24 +151,33 @@ router.delete('/:id', verifyToken, async (req, res) => {
   }
 });
 
-// Preview project in new tab
-router.get('/:id/preview', verifyToken, async (req, res) => {
+// Public shared preview (no authentication required)
+router.get('/:id/preview', async (req, res) => {
   try {
     const projectId = req.params.id;
     
-    // Verify project ownership
+    // Get project (no user verification - public access)
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found' });
+      return res.status(404).send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>プロジェクトが見つかりません</title></head>
+        <body>
+          <h1>プロジェクトが見つかりません</h1>
+          <p>指定されたプロジェクトは存在しません。</p>
+        </body>
+        </html>
+      `);
     }
 
     // Get all files for the project
     const [files] = await db.execute(
-      'SELECT * FROM files WHERE project_id = ? ORDER BY file_path, file_name',
+      'SELECT * FROM project_files WHERE project_id = ? ORDER BY file_path, file_name',
       [projectId]
     );
 

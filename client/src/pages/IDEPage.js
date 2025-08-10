@@ -195,19 +195,30 @@ const IDEPage = () => {
 
   const fetchProject = async () => {
     try {
+      console.log('Fetching project with ID:', projectId);
       const response = await axios.get(`/api/projects/${projectId}`);
+      console.log('Project fetched successfully:', response.data);
       setProject(response.data);
     } catch (error) {
       console.error('Error fetching project:', error);
+      console.error('Error response:', error.response);
+      console.error('Error status:', error.response?.status);
+      console.error('Error data:', error.response?.data);
       if (error.response?.status === 404) {
+        console.log('Project not found, navigating to dashboard');
         navigate('/');
+      } else if (error.response?.status === 401) {
+        console.log('Unauthorized access, user may need to login');
+        // Don't navigate away on auth error, let AuthContext handle it
       }
     }
   };
 
   const fetchFileTree = async () => {
     try {
+      console.log('Fetching file tree for project ID:', projectId);
       const response = await axios.get(`/api/files/tree/${projectId}`);
+      console.log('File tree fetched successfully:', response.data);
       setFileTree(response.data);
       
       // Select index.html by default if available
@@ -216,6 +227,9 @@ const IDEPage = () => {
       }
     } catch (error) {
       console.error('Error fetching file tree:', error);
+      console.error('File tree error response:', error.response);
+      console.error('File tree error status:', error.response?.status);
+      console.error('File tree error data:', error.response?.data);
     } finally {
       setLoading(false);
     }
