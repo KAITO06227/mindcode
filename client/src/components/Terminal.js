@@ -8,8 +8,11 @@ import '@xterm/xterm/css/xterm.css';
 
 const TerminalContainer = styled.div`
   height: 100%;
+  min-height: 200px;
   background-color: #1e1e1e;
   position: relative;
+  display: flex;
+  flex-direction: column;
 `;
 
 const TerminalHeader = styled.div`
@@ -52,8 +55,11 @@ const ActionButton = styled.button`
 `;
 
 const TerminalWrapper = styled.div`
-  height: calc(100% - 40px);
+  flex: 1;
+  min-height: 140px;
   padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
 `;
 
 const ClaudePromptContainer = styled.div`
@@ -106,23 +112,56 @@ const Terminal = ({ projectId }) => {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const fitAddonRef = useRef(null);
+  const resizeObserverRef = useRef(null);
   const [prompt, setPrompt] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [autoCommit, setAutoCommit] = useState(true);
 
   useEffect(() => {
-    if (terminalRef.current && !xtermRef.current) {
-      initializeTerminal();
-    }
+    let mounted = true;
+    
+    const initTerminal = async () => {
+      // Wait for container to be ready
+      let attempts = 0;
+      const maxAttempts = 10;
+      
+      while (attempts < maxAttempts && mounted) {
+        if (terminalRef.current && 
+            terminalRef.current.offsetWidth > 0 && 
+            terminalRef.current.offsetHeight > 0 &&
+            !xtermRef.current) {
+          try {
+            await initializeTerminal();
+            break;
+          } catch (error) {
+            console.warn('Terminal initialization attempt failed:', error);
+          }
+        }
+        
+        attempts++;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    };
+
+    initTerminal();
 
     return () => {
+      mounted = false;
+      if (resizeObserverRef.current) {
+        resizeObserverRef.current.disconnect();
+      }
       if (xtermRef.current) {
         xtermRef.current.dispose();
+        xtermRef.current = null;
       }
     };
   }, []);
 
-  const initializeTerminal = () => {
+
+  const initializeTerminal = async () => {
+    if (!terminalRef.current || xtermRef.current) {
+      return;
+    }
     const terminal = new XTerm({
       theme: {
         background: '#1e1e1e',
@@ -160,8 +199,28 @@ const Terminal = ({ projectId }) => {
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
 
+    // Open terminal first
     terminal.open(terminalRef.current);
-    fitAddon.fit();
+    
+    // Wait for DOM to be ready and fit the terminal
+    await new Promise(resolve => {
+      const tryFit = () => {
+        try {
+          if (fitAddon && terminalRef.current && 
+              terminalRef.current.offsetWidth > 0 && 
+              terminalRef.current.offsetHeight > 0) {
+            fitAddon.fit();
+            resolve();
+          } else {
+            setTimeout(tryFit, 50);
+          }
+        } catch (error) {
+          console.warn('Terminal fit error:', error);
+          resolve(); // Continue even if fit fails
+        }
+      };
+      tryFit();
+    });
 
     // Welcome message
     terminal.writeln('\x1b[1;34mWebIDE Terminal with Claude Code Integration\x1b[0m');
@@ -174,15 +233,39 @@ const Terminal = ({ projectId }) => {
 
     // Handle window resize
     const handleResize = () => {
-      if (fitAddonRef.current) {
-        fitAddonRef.current.fit();
+      if (fitAddonRef.current && terminalRef.current) {
+        try {
+          // Check if container has valid dimensions
+          if (terminalRef.current.offsetWidth > 0 && terminalRef.current.offsetHeight > 0) {
+            fitAddonRef.current.fit();
+          }
+        } catch (error) {
+          console.warn('Terminal resize error:', error);
+        }
       }
     };
 
     window.addEventListener('resize', handleResize);
 
+    // Setup ResizeObserver for container size changes
+    if (terminalRef.current && window.ResizeObserver) {
+      resizeObserverRef.current = new ResizeObserver((entries) => {
+        // Debounce resize calls
+        clearTimeout(resizeObserverRef.resizeTimeout);
+        resizeObserverRef.resizeTimeout = setTimeout(() => {
+          if (entries.length > 0 && entries[0].contentRect.width > 0) {
+            handleResize();
+          }
+        }, 100);
+      });
+      resizeObserverRef.current.observe(terminalRef.current);
+    }
+
     return () => {
       window.removeEventListener('resize', handleResize);
+      if (resizeObserverRef.current) {
+        resizeObserverRef.current.disconnect();
+      }
     };
   };
 
@@ -274,7 +357,11 @@ const Terminal = ({ projectId }) => {
       </TerminalHeader>
 
       <TerminalWrapper>
-        <div ref={terminalRef} style={{ height: 'calc(100% - 60px)' }} />
+        <div ref={terminalRef} style={{ 
+          flex: 1, 
+          minHeight: '100px',
+          width: '100%'
+        }} />
         
         <ClaudePromptContainer>
           <PromptInput

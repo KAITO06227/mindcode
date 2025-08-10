@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
 import styled from 'styled-components';
 
@@ -29,8 +29,82 @@ const PlaceholderText = styled.p`
   line-height: 1.5;
 `;
 
-const CodeEditor = ({ file, onChange }) => {
+const SaveStatusBar = styled.div`
+  position: absolute;
+  top: 0;
+  right: 0;
+  background-color: ${props => props.$saved ? '#28a745' : '#ffc107'};
+  color: ${props => props.$saved ? '#ffffff' : '#000000'};
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  border-bottom-left-radius: 4px;
+  z-index: 10;
+  opacity: ${props => props.$show ? 1 : 0};
+  transition: opacity 0.3s ease;
+`;
+
+const EditorWrapper = styled.div`
+  position: relative;
+  height: 100%;
+  width: 100%;
+`;
+
+const CodeEditor = ({ file, onChange, onSave, autoSave = true, autoSaveInterval = 3000 }) => {
   const editorRef = useRef(null);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(null);
+  const [showSaveStatus, setShowSaveStatus] = useState(false);
+  const autoSaveTimeoutRef = useRef(null);
+
+  // Save function with status feedback
+  const saveFile = useCallback(async () => {
+    if (!file || !onSave) return;
+
+    try {
+      setSaveStatus('saving');
+      setShowSaveStatus(true);
+      
+      await onSave();
+      
+      setSaveStatus('saved');
+      setHasUnsavedChanges(false);
+      
+      // Hide save status after 2 seconds
+      setTimeout(() => {
+        setShowSaveStatus(false);
+      }, 2000);
+      
+    } catch (error) {
+      console.error('Error saving file:', error);
+      setSaveStatus('error');
+      
+      // Hide error status after 3 seconds
+      setTimeout(() => {
+        setShowSaveStatus(false);
+      }, 3000);
+    }
+  }, [file, onSave]);
+
+  // Auto-save functionality
+  useEffect(() => {
+    if (autoSave && hasUnsavedChanges && file) {
+      // Clear existing timeout
+      if (autoSaveTimeoutRef.current) {
+        clearTimeout(autoSaveTimeoutRef.current);
+      }
+
+      // Set new timeout
+      autoSaveTimeoutRef.current = setTimeout(() => {
+        saveFile();
+      }, autoSaveInterval);
+    }
+
+    return () => {
+      if (autoSaveTimeoutRef.current) {
+        clearTimeout(autoSaveTimeoutRef.current);
+      }
+    };
+  }, [hasUnsavedChanges, autoSave, autoSaveInterval, saveFile, file]);
 
   const handleEditorDidMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -78,16 +152,34 @@ const CodeEditor = ({ file, onChange }) => {
 
     // Add keyboard shortcuts
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      // Trigger save - this would be handled by parent component
-      if (onChange && file) {
-        onChange(editor.getValue());
-      }
+      // Prevent browser default save behavior
+      saveFile();
     });
   };
 
   const handleEditorChange = (value) => {
     if (onChange) {
       onChange(value);
+      setHasUnsavedChanges(true);
+    }
+  };
+
+  // Reset unsaved changes when file changes
+  useEffect(() => {
+    setHasUnsavedChanges(false);
+  }, [file?.id]);
+
+  // Get save status text in Japanese
+  const getSaveStatusText = () => {
+    switch (saveStatus) {
+      case 'saving':
+        return '保存中...';
+      case 'saved':
+        return '保存完了';
+      case 'error':
+        return '保存エラー';
+      default:
+        return '';
     }
   };
 
@@ -135,11 +227,11 @@ const CodeEditor = ({ file, onChange }) => {
   if (!file) {
     return (
       <PlaceholderContainer>
-        <PlaceholderTitle>No file selected</PlaceholderTitle>
+        <PlaceholderTitle>ファイルが選択されていません</PlaceholderTitle>
         <PlaceholderText>
-          Select a file from the explorer to start editing.
+          エクスプローラーからファイルを選択して編集を開始してください。
           <br />
-          You can create new files and folders using the context menu.
+          コンテキストメニューを使用して新しいファイルやフォルダを作成できます。
         </PlaceholderText>
       </PlaceholderContainer>
     );
@@ -147,37 +239,45 @@ const CodeEditor = ({ file, onChange }) => {
 
   return (
     <EditorContainer>
-      <Editor
-        height="100%"
-        language={getLanguage(file.file_name)}
-        value={file.content || ''}
-        onChange={handleEditorChange}
-        onMount={handleEditorDidMount}
-        theme="vs-dark-custom"
-        options={{
-          selectOnLineNumbers: true,
-          roundedSelection: false,
-          readOnly: false,
-          cursorStyle: 'line',
-          automaticLayout: true,
-          glyphMargin: true,
-          folding: true,
-          lineNumbersMinChars: 3,
-          scrollbar: {
-            vertical: 'auto',
-            horizontal: 'auto',
-            verticalScrollbarSize: 14,
-            horizontalScrollbarSize: 14
-          },
-          suggest: {
-            showKeywords: true,
-            showSnippets: true,
-            showClasses: true,
-            showFunctions: true,
-            showVariables: true
-          }
-        }}
-      />
+      <EditorWrapper>
+        <SaveStatusBar 
+          $show={showSaveStatus}
+          $saved={saveStatus === 'saved'}
+        >
+          {getSaveStatusText()}
+        </SaveStatusBar>
+        <Editor
+          height="100%"
+          language={getLanguage(file.file_name)}
+          value={file.content || ''}
+          onChange={handleEditorChange}
+          onMount={handleEditorDidMount}
+          theme="vs-dark-custom"
+          options={{
+            selectOnLineNumbers: true,
+            roundedSelection: false,
+            readOnly: false,
+            cursorStyle: 'line',
+            automaticLayout: true,
+            glyphMargin: true,
+            folding: true,
+            lineNumbersMinChars: 3,
+            scrollbar: {
+              vertical: 'auto',
+              horizontal: 'auto',
+              verticalScrollbarSize: 14,
+              horizontalScrollbarSize: 14
+            },
+            suggest: {
+              showKeywords: true,
+              showSnippets: true,
+              showClasses: true,
+              showFunctions: true,
+              showVariables: true
+            }
+          }}
+        />
+      </EditorWrapper>
     </EditorContainer>
   );
 };

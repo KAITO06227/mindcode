@@ -23,17 +23,17 @@ const TreeItem = styled.div`
   padding: 0.25rem 0.5rem;
   cursor: pointer;
   user-select: none;
-  color: ${props => props.selected ? '#ffffff' : '#cccccc'};
-  background-color: ${props => props.selected ? '#094771' : 'transparent'};
+  color: ${props => props.$selected ? '#ffffff' : '#cccccc'};
+  background-color: ${props => props.$selected ? '#094771' : 'transparent'};
   border-radius: 4px;
   margin: 1px 0;
   position: relative;
 
   &:hover {
-    background-color: ${props => props.selected ? '#094771' : '#2a2a2a'};
+    background-color: ${props => props.$selected ? '#094771' : '#2a2a2a'};
   }
 
-  padding-left: ${props => props.depth * 16 + 8}px;
+  padding-left: ${props => props.$depth * 16 + 8}px;
 `;
 
 const ItemIcon = styled.div`
@@ -41,8 +41,8 @@ const ItemIcon = styled.div`
   display: flex;
   align-items: center;
   color: ${props => {
-    if (props.type === 'folder') return '#dcb67a';
-    if (props.isOpen) return '#dcb67a';
+    if (props.$type === 'folder') return '#dcb67a';
+    if (props.$isOpen) return '#dcb67a';
     return '#6a9955';
   }};
 `;
@@ -177,7 +177,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
 
   const handleCreateFile = async (parentPath = '') => {
     try {
-      const fileName = prompt('Enter file name:');
+      const fileName = prompt('ファイル名を入力してください:');
       if (!fileName) return;
 
       await axios.post(`/api/files/${projectId}`, {
@@ -190,14 +190,14 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       onTreeUpdate();
     } catch (error) {
       console.error('Error creating file:', error);
-      alert('Failed to create file');
+      alert('ファイルの作成に失敗しました');
     }
     closeContextMenu();
   };
 
   const handleCreateFolder = async (parentPath = '') => {
     try {
-      const folderName = prompt('Enter folder name:');
+      const folderName = prompt('フォルダ名を入力してください:');
       if (!folderName) return;
 
       await axios.post(`/api/files/${projectId}`, {
@@ -210,7 +210,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       setExpandedFolders(prev => new Set([...prev, parentPath ? `${parentPath}/${folderName}` : folderName]));
     } catch (error) {
       console.error('Error creating folder:', error);
-      alert('Failed to create folder');
+      alert('フォルダの作成に失敗しました');
     }
     closeContextMenu();
   };
@@ -235,7 +235,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       onTreeUpdate();
     } catch (error) {
       console.error('Error renaming item:', error);
-      alert('Failed to rename item');
+      alert('名前の変更に失敗しました');
     }
 
     setEditingItem(null);
@@ -243,7 +243,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
   };
 
   const handleDelete = async (item) => {
-    if (!window.confirm(`Are you sure you want to delete ${item.name}?`)) {
+    if (!window.confirm(`${item.name}を削除しますか？`)) {
       return;
     }
 
@@ -252,7 +252,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       onTreeUpdate();
     } catch (error) {
       console.error('Error deleting item:', error);
-      alert('Failed to delete item');
+      alert('アイテムの削除に失敗しました');
     }
     closeContextMenu();
   };
@@ -278,7 +278,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       onTreeUpdate();
     } catch (error) {
       console.error('Error uploading files:', error);
-      alert('Failed to upload files');
+      alert('ファイルのアップロードに失敗しました');
     }
   };
 
@@ -303,12 +303,12 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
     return (
       <div key={currentPath}>
         <TreeItem
-          depth={depth}
-          selected={isSelected}
+          $depth={depth}
+          $selected={isSelected}
           onClick={(e) => handleItemClick({ ...item, path: currentPath }, e)}
           onContextMenu={(e) => handleRightClick({ ...item, path: currentPath }, e)}
         >
-          <ItemIcon type={item.type} isOpen={isExpanded}>
+          <ItemIcon $type={item.type} $isOpen={isExpanded}>
             {item.type === 'folder' ? (
               <FiFolder size={16} />
             ) : (
@@ -381,19 +381,19 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
           <ContextMenu x={contextMenu.x} y={contextMenu.y}>
             <ContextMenuItem onClick={() => handleCreateFile(contextMenu.item.path)}>
               <FiFile size={14} />
-              New File
+              新しいファイル
             </ContextMenuItem>
             <ContextMenuItem onClick={() => handleCreateFolder(contextMenu.item.path)}>
               <FiFolder size={14} />
-              New Folder
+              新しいフォルダ
             </ContextMenuItem>
             <ContextMenuItem onClick={() => handleRename(contextMenu.item)}>
               <FiEdit2 size={14} />
-              Rename
+              名前を変更
             </ContextMenuItem>
             <ContextMenuItem onClick={() => handleDelete(contextMenu.item)}>
               <FiTrash2 size={14} />
-              Delete
+              削除
             </ContextMenuItem>
           </ContextMenu>
         </>

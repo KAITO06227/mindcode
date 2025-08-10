@@ -5,12 +5,7 @@ import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
 import { 
   FiArrowLeft, 
-  FiSave, 
-  FiPlay, 
-  FiGitBranch, 
-  FiGitCommit, 
-  FiTerminal,
-  FiSettings
+  FiSave
 } from 'react-icons/fi';
 import FileTree from '../components/FileTree';
 import CodeEditor from '../components/CodeEditor';
@@ -77,14 +72,14 @@ const Button = styled.button`
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   background-color: ${props => {
-    switch(props.variant) {
+    switch(props.$variant) {
       case 'primary': return '#007acc';
       case 'success': return '#28a745';
       case 'warning': return '#ffc107';
       default: return '#404040';
     }
   }};
-  color: ${props => props.variant === 'warning' ? '#000' : '#fff'};
+  color: ${props => props.$variant === 'warning' ? '#000' : '#fff'};
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -144,13 +139,19 @@ const EditorContainer = styled.div`
   background-color: #1e1e1e;
 `;
 
-const BrowserContainer = styled.div`
-  height: 60%;
-  border-bottom: 1px solid #404040;
-`;
-
 const TerminalContainer = styled.div`
   height: 40%;
+  border-bottom: 1px solid #404040;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+`;
+
+const BrowserContainer = styled.div`
+  height: 60%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 `;
 
 const TabBar = styled.div`
@@ -163,10 +164,10 @@ const Tab = styled.button`
   padding: 0.75rem 1rem;
   background: none;
   border: none;
-  color: ${props => props.active ? '#ffffff' : '#cccccc'};
+  color: ${props => props.$active ? '#ffffff' : '#cccccc'};
   cursor: pointer;
   font-size: 0.875rem;
-  border-bottom: 2px solid ${props => props.active ? '#007acc' : 'transparent'};
+  border-bottom: 2px solid ${props => props.$active ? '#007acc' : 'transparent'};
 
   &:hover {
     background-color: #404040;
@@ -182,7 +183,8 @@ const IDEPage = () => {
   const [project, setProject] = useState(null);
   const [fileTree, setFileTree] = useState({});
   const [selectedFile, setSelectedFile] = useState(null);
-  const [activeRightTab, setActiveRightTab] = useState('preview');
+  // Remove tab state - show terminal and preview simultaneously
+  // const [activeRightTab, setActiveRightTab] = useState('preview');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -238,8 +240,11 @@ const IDEPage = () => {
       await axios.put(`/api/files/${projectId}/${selectedFile.id}`, {
         content: selectedFile.content
       });
+      
+      return true; // Return success
     } catch (error) {
       console.error('Error saving file:', error);
+      throw error; // Re-throw for CodeEditor to handle
     } finally {
       setSaving(false);
     }
@@ -254,16 +259,12 @@ const IDEPage = () => {
     }
   };
 
-  const handleRunProject = () => {
-    // This would trigger the preview update
-    setActiveRightTab('preview');
-  };
 
   if (loading) {
     return (
       <IDEContainer>
         <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
-          Loading IDE...
+          IDEを読み込み中...
         </div>
       </IDEContainer>
     );
@@ -275,7 +276,7 @@ const IDEPage = () => {
         <HeaderLeft>
           <BackButton onClick={() => navigate('/')}>
             <FiArrowLeft size={16} />
-            Back to Dashboard
+            ダッシュボードに戻る
           </BackButton>
           <ProjectTitle>{project?.name}</ProjectTitle>
         </HeaderLeft>
@@ -283,29 +284,14 @@ const IDEPage = () => {
         <HeaderRight>
           <Button onClick={handleSave} disabled={!selectedFile || saving}>
             <FiSave size={14} />
-            {saving ? 'Saving...' : 'Save'}
-          </Button>
-          
-          <Button variant="success" onClick={handleRunProject}>
-            <FiPlay size={14} />
-            Run
-          </Button>
-          
-          <Button onClick={() => setActiveRightTab('git')}>
-            <FiGitBranch size={14} />
-            Git
-          </Button>
-          
-          <Button onClick={() => setActiveRightTab('terminal')}>
-            <FiTerminal size={14} />
-            Terminal
+            {saving ? '保存中...' : '保存'}
           </Button>
         </HeaderRight>
       </Header>
 
       <MainContent>
         <LeftPanel>
-          <PanelHeader>Explorer</PanelHeader>
+          <PanelHeader>エクスプローラー</PanelHeader>
           <FileTree
             fileTree={fileTree}
             selectedFile={selectedFile}
@@ -320,49 +306,31 @@ const IDEPage = () => {
             <CodeEditor
               file={selectedFile}
               onChange={handleFileContentChange}
+              onSave={handleSave}
+              autoSave={true}
+              autoSaveInterval={3000}
             />
           </EditorContainer>
         </CenterPanel>
 
         <RightPanel>
-          <TabBar>
-            <Tab 
-              active={activeRightTab === 'preview'} 
-              onClick={() => setActiveRightTab('preview')}
-            >
-              Preview
-            </Tab>
-            <Tab 
-              active={activeRightTab === 'git'} 
-              onClick={() => setActiveRightTab('git')}
-            >
-              Git
-            </Tab>
-            <Tab 
-              active={activeRightTab === 'terminal'} 
-              onClick={() => setActiveRightTab('terminal')}
-            >
-              Terminal
-            </Tab>
-          </TabBar>
-
-          {activeRightTab === 'preview' && (
-            <BrowserContainer>
-              <SmallBrowser projectId={projectId} />
-            </BrowserContainer>
-          )}
-
-          {activeRightTab === 'git' && (
-            <div style={{ flex: 1, overflow: 'auto' }}>
-              <GitPanel projectId={projectId} />
-            </div>
-          )}
-
-          {activeRightTab === 'terminal' && (
-            <TerminalContainer>
+          {/* Terminal at top */}
+          <TerminalContainer>
+            <PanelHeader>ターミナル</PanelHeader>
+            <div style={{ flex: 1, overflow: 'hidden' }}>
               <Terminal projectId={projectId} />
-            </TerminalContainer>
-          )}
+            </div>
+          </TerminalContainer>
+          
+          {/* Preview at bottom */}
+          <BrowserContainer>
+            <PanelHeader>プレビュー</PanelHeader>
+            <div style={{ flex: 1, overflow: 'hidden' }}>
+              <SmallBrowser 
+                projectId={projectId}
+              />
+            </div>
+          </BrowserContainer>
         </RightPanel>
       </MainContent>
     </IDEContainer>

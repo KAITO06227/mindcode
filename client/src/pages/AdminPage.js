@@ -80,7 +80,7 @@ const Button = styled.button`
   align-items: center;
   gap: 0.5rem;
   padding: 0.5rem 1rem;
-  background-color: ${props => props.variant === 'danger' ? '#dc3545' : '#404040'};
+  background-color: ${props => props.$variant === 'danger' ? '#dc3545' : '#404040'};
   color: white;
   border: none;
   border-radius: 4px;
@@ -89,7 +89,7 @@ const Button = styled.button`
   transition: background-color 0.2s;
 
   &:hover {
-    background-color: ${props => props.variant === 'danger' ? '#c82333' : '#555'};
+    background-color: ${props => props.$variant === 'danger' ? '#c82333' : '#555'};
   }
 
   &:disabled {
@@ -276,12 +276,12 @@ const AdminPage = () => {
       ));
     } catch (error) {
       console.error('Error updating user role:', error);
-      alert('Failed to update user role');
+      alert('ユーザーの役割更新に失敗しました');
     }
   };
 
   const deleteUser = async (userId) => {
-    if (!window.confirm('Are you sure you want to delete this user?')) {
+    if (!window.confirm('このユーザーを削除しますか？')) {
       return;
     }
 
@@ -290,7 +290,7 @@ const AdminPage = () => {
       setUsers(users.filter(user => user.id !== userId));
     } catch (error) {
       console.error('Error deleting user:', error);
-      alert('Failed to delete user');
+      alert('ユーザーの削除に失敗しました');
     }
   };
 
@@ -305,7 +305,7 @@ const AdminPage = () => {
       window.open(previewUrl, '_blank');
     } catch (error) {
       console.error('Error opening project preview:', error);
-      alert('Failed to open project preview');
+      alert('プロジェクトのプレビューを開けませんでした');
     }
   };
 
@@ -319,9 +319,9 @@ const AdminPage = () => {
         <HeaderLeft>
           <BackButton to="/">
             <FiArrowLeft size={16} />
-            Back to Dashboard
+            ダッシュボードに戻る
           </BackButton>
-          <Title>Admin Panel</Title>
+          <Title>管理パネル</Title>
         </HeaderLeft>
         
         <UserSection>
@@ -333,7 +333,7 @@ const AdminPage = () => {
           
           <Button onClick={logout}>
             <FiLogOut size={16} />
-            Logout
+            ログアウト
           </Button>
         </UserSection>
       </Header>
@@ -345,14 +345,14 @@ const AdminPage = () => {
             onClick={() => setActiveTab('users')}
           >
             <FiUsers size={16} />
-            Users Management
+            ユーザー管理
           </Tab>
           <Tab 
             active={activeTab === 'projects'} 
             onClick={() => setActiveTab('projects')}
           >
             <FiFolder size={16} />
-            Projects Overview
+            プロジェクト一覧
           </Tab>
         </TabContainer>
 
@@ -360,22 +360,22 @@ const AdminPage = () => {
           {activeTab === 'users' && (
             <div>
               <h3 style={{ color: '#ffffff', marginBottom: '1rem' }}>
-                User Management ({users.length} users)
+                ユーザー管理 ({users.length}人)
               </h3>
               
               {loading ? (
                 <div style={{ color: '#cccccc', textAlign: 'center', padding: '2rem' }}>
-                  Loading users...
+                  ユーザーを読み込み中...
                 </div>
               ) : (
                 <Table>
                   <thead>
                     <tr>
-                      <TableHeader>User</TableHeader>
-                      <TableHeader>Email</TableHeader>
-                      <TableHeader>Role</TableHeader>
-                      <TableHeader>Joined</TableHeader>
-                      <TableHeader>Actions</TableHeader>
+                      <TableHeader>ユーザー</TableHeader>
+                      <TableHeader>メール</TableHeader>
+                      <TableHeader>役割</TableHeader>
+                      <TableHeader>登録日</TableHeader>
+                      <TableHeader>操作</TableHeader>
                     </tr>
                   </thead>
                   <tbody>
@@ -397,15 +397,15 @@ const AdminPage = () => {
                             value={user.role}
                             onChange={(e) => updateUserRole(user.id, e.target.value)}
                           >
-                            <option value="student">Student</option>
-                            <option value="teacher">Teacher</option>
+                            <option value="student">学生</option>
+                            <option value="teacher">教師</option>
                           </Select>
                         </TableCell>
                         <TableCell>{formatDate(user.created_at)}</TableCell>
                         <TableCell>
                           <ActionButton
                             onClick={() => deleteUser(user.id)}
-                            title="Delete user"
+                            title="ユーザーを削除"
                           >
                             <FiTrash2 size={14} />
                           </ActionButton>
@@ -421,12 +421,12 @@ const AdminPage = () => {
           {activeTab === 'projects' && (
             <div>
               <h3 style={{ color: '#ffffff', marginBottom: '1rem' }}>
-                Projects Overview ({projects.length} projects)
+                プロジェクト一覧 ({projects.length} projects)
               </h3>
               
               {loading ? (
                 <div style={{ color: '#cccccc', textAlign: 'center', padding: '2rem' }}>
-                  Loading projects...
+                  プロジェクトを読み込み中...
                 </div>
               ) : (
                 projects.map(project => (
@@ -434,27 +434,27 @@ const AdminPage = () => {
                     <ProjectInfo>
                       <ProjectTitle>{project.name}</ProjectTitle>
                       <ProjectMeta>
-                        <span>Owner: {project.user_name} ({project.user_email})</span>
-                        <span>Updated: {formatDate(project.updated_at)}</span>
-                        {project.git_url && <span>Git: Connected</span>}
+                        <span>所有者: {project.user_name} ({project.user_email})</span>
+                        <span>更新: {formatDate(project.updated_at)}</span>
+                        {project.git_url && <span>Git: 接続済み</span>}
                       </ProjectMeta>
                     </ProjectInfo>
                     <ProjectActions>
                       <ActionButton
                         onClick={() => viewProject(project.id)}
-                        title="Edit project"
+                        title="プロジェクトを編集"
                       >
                         <FiEdit size={16} />
                       </ActionButton>
                       <ActionButton
                         onClick={() => viewProjectPreview(project.id)}
-                        title="Preview project"
+                        title="プロジェクトをプレビュー"
                       >
                         <FiEye size={16} />
                       </ActionButton>
                       <ActionButton
                         onClick={() => viewProjectPreview(project.id)}
-                        title="Open in new tab"
+                        title="新しいタブで開く"
                       >
                         <FiExternalLink size={16} />
                       </ActionButton>

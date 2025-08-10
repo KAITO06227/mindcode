@@ -126,9 +126,17 @@ const SmallBrowser = ({ projectId }) => {
     loadProject();
   }, [projectId]);
 
+  // Update iframe when htmlContent changes
+  useEffect(() => {
+    if (htmlContent) {
+      updateIframe(htmlContent);
+    }
+  }, [htmlContent]);
+
   const loadProject = async () => {
     if (!projectId) return;
-
+    
+    console.log('SmallBrowser: loadProject called for projectId:', projectId);
     setLoading(true);
     setError(null);
 
@@ -148,26 +156,75 @@ const SmallBrowser = ({ projectId }) => {
         const cssFiles = findFilesByExtension(fileTree, 'css');
         const jsFiles = findFilesByExtension(fileTree, 'js');
 
-        // Embed CSS
+        // Embed CSS files
         for (const cssFile of cssFiles) {
-          const cssResponse = await axios.get(`/api/files/${projectId}/${cssFile.id}`);
-          htmlContent = htmlContent.replace(
-            `<link rel="stylesheet" href="${cssFile.file_name}">`,
-            `<style>\n${cssResponse.data.content}\n</style>`
-          );
+          try {
+            const cssResponse = await axios.get(`/api/files/${projectId}/${cssFile.id}`);
+            const cssContent = cssResponse.data.content;
+            
+            // Replace various CSS link patterns
+            const fileName = cssFile.name || cssFile.file_name;
+            
+            // Simple string replacements first
+            const exactPatterns = [
+              `<link rel="stylesheet" href="${fileName}">`,
+              `<link rel="stylesheet" href="${fileName}" />`,
+              `<link href="${fileName}" rel="stylesheet">`,
+              `<link href="${fileName}" rel="stylesheet" />`,
+              `<link rel="stylesheet" href="./${fileName}">`,
+              `<link rel="stylesheet" href="./${fileName}" />`
+            ];
+            
+            exactPatterns.forEach(pattern => {
+              htmlContent = htmlContent.replace(new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), 
+                `<style>\n${cssContent}\n</style>`);
+            });
+            
+            console.log(`Embedded CSS file: ${fileName}`);
+          } catch (error) {
+            console.warn(`Failed to embed CSS file ${cssFile.name}:`, error);
+          }
         }
 
-        // Embed JS
+        // Embed JS files
         for (const jsFile of jsFiles) {
-          const jsResponse = await axios.get(`/api/files/${projectId}/${jsFile.id}`);
-          htmlContent = htmlContent.replace(
-            `<script src="${jsFile.file_name}"></script>`,
-            `<script>\n${jsResponse.data.content}\n</script>`
-          );
+          try {
+            const jsResponse = await axios.get(`/api/files/${projectId}/${jsFile.id}`);
+            const jsContent = jsResponse.data.content;
+            
+            // Replace various script src patterns
+            const fileName = jsFile.name || jsFile.file_name;
+            
+            const exactPatterns = [
+              `<script src="${fileName}"></script>`,
+              `<script src="${fileName}"></script>`,
+              `<script src="./${fileName}"></script>`,
+              `<script type="text/javascript" src="${fileName}"></script>`,
+              `<script type="text/javascript" src="./${fileName}"></script>`
+            ];
+            
+            exactPatterns.forEach(pattern => {
+              htmlContent = htmlContent.replace(new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), 
+                `<script>\n${jsContent}\n</script>`);
+            });
+            
+            console.log(`Embedded JS file: ${fileName}`);
+          } catch (error) {
+            console.warn(`Failed to embed JS file ${jsFile.name}:`, error);
+          }
         }
 
+        // Clean up any remaining external references that couldn't be embedded
+        // Remove broken CSS links
+        htmlContent = htmlContent.replace(/<link[^>]*href=['"'][^'"]*\.css['"][^>]*>/gi, 
+          '<!-- CSS file not found and removed -->');
+        
+        // Remove broken script sources  
+        htmlContent = htmlContent.replace(/<script[^>]*src=['"'][^'"]*\.js['"][^>]*><\/script>/gi, 
+          '<!-- JS file not found and removed -->');
+
+        console.log('SmallBrowser: Setting HTML content:', htmlContent.length, 'characters');
         setHtmlContent(htmlContent);
-        updateIframe(htmlContent);
       } else {
         setError('No index.html file found in project');
       }
@@ -213,12 +270,29 @@ const SmallBrowser = ({ projectId }) => {
   };
 
   const updateIframe = (content) => {
-    if (iframeRef.current) {
+    if (iframeRef.current && content) {
       const iframe = iframeRef.current;
-      const doc = iframe.contentDocument || iframe.contentWindow.document;
-      doc.open();
-      doc.write(content);
-      doc.close();
+      
+      console.log('SmallBrowser: updateIframe called with content length:', content.length);
+      
+      // Always update - remove the content comparison that might be causing issues
+      console.log('SmallBrowser: Updating iframe with fresh content');
+      
+      // Clear existing content first
+      iframe.removeAttribute('srcdoc');
+      
+      // Add timestamp to force refresh
+      const timestampedContent = content.replace(
+        '<html',
+        `<html data-timestamp="${Date.now()}"`
+      );
+      
+      // Set new content
+      iframe.setAttribute('srcdoc', timestampedContent);
+      
+      console.log('SmallBrowser: Iframe updated successfully');
+    } else {
+      console.log('SmallBrowser: updateIframe - no iframe or content');
     }
   };
 
@@ -237,20 +311,22 @@ const SmallBrowser = ({ projectId }) => {
   };
 
   const handleRefresh = () => {
-    if (htmlContent) {
-      updateIframe(htmlContent);
-    } else {
-      loadProject();
-    }
+    console.log('SmallBrowser: Manual refresh triggered');
+    console.log('SmallBrowser: Current htmlContent:', htmlContent ? htmlContent.length : 'none');
+    
+    // Always reload the project to get fresh content
+    loadProject();
   };
 
   const handleOpenInNewTab = () => {
-    if (htmlContent) {
-      const blob = new Blob([htmlContent], { type: 'text/html' });
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
-      // Clean up the blob URL after a short delay
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    if (projectId) {
+      // Use server-side preview endpoint for persistent URL
+      const previewUrl = `/api/projects/${projectId}/preview`;
+      window.open(previewUrl, '_blank');
+    } else if (htmlContent) {
+      // Fallback to data URL
+      const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent);
+      window.open(dataUrl, '_blank');
     }
   };
 
@@ -265,7 +341,7 @@ const SmallBrowser = ({ projectId }) => {
           <ToolbarButton onClick={handleRunProject}>
             <FiPlay size={14} />
           </ToolbarButton>
-          <BrowserLabel>Small Browser</BrowserLabel>
+          <BrowserLabel>スモールブラウザ</BrowserLabel>
         </BrowserToolbar>
         <ErrorMessage>
           <ErrorTitle>Preview Error</ErrorTitle>
@@ -305,7 +381,7 @@ const SmallBrowser = ({ projectId }) => {
           <FiRefreshCw size={14} />
         </ToolbarButton>
         
-        <BrowserLabel>Small Browser</BrowserLabel>
+        <BrowserLabel>スモールブラウザ</BrowserLabel>
         
         <ToolbarButton
           onClick={handleOpenInNewTab}
@@ -326,7 +402,8 @@ const SmallBrowser = ({ projectId }) => {
         <IFrame
           ref={iframeRef}
           title="Project Preview"
-          sandbox="allow-scripts allow-same-origin allow-forms"
+          sandbox="allow-scripts allow-forms allow-same-origin"
+          srcDoc={htmlContent}
         />
       </IframeContainer>
     </BrowserContainer>

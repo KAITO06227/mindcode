@@ -50,7 +50,7 @@ const Button = styled.button`
   align-items: center;
   gap: 0.5rem;
   padding: 0.5rem 1rem;
-  background-color: ${props => props.variant === 'primary' ? '#007acc' : '#404040'};
+  background-color: ${props => props.$variant === 'primary' ? '#007acc' : '#404040'};
   color: white;
   border: none;
   border-radius: 4px;
@@ -59,7 +59,7 @@ const Button = styled.button`
   transition: background-color 0.2s;
 
   &:hover {
-    background-color: ${props => props.variant === 'primary' ? '#005a9e' : '#555'};
+    background-color: ${props => props.$variant === 'primary' ? '#005a9e' : '#555'};
   }
 `;
 
@@ -231,7 +231,7 @@ const DashboardPage = () => {
 
       <Main>
         <WelcomeSection>
-          <WelcomeTitle>おかえりなさい、{user?.name}さん！</WelcomeTitle>
+          <WelcomeTitle>MindCodeへようこそ</WelcomeTitle>
           <WelcomeText>
             新しいプロジェクトを作成するか、既存のプロジェクトを継続してください。
           </WelcomeText>
@@ -240,7 +240,7 @@ const DashboardPage = () => {
         <ProjectsSection>
           <SectionHeader>
             <SectionTitle>あなたのプロジェクト</SectionTitle>
-            <Button variant="primary" onClick={() => setShowCreateModal(true)}>
+            <Button $variant="primary" onClick={() => setShowCreateModal(true)}>
               <FiPlus size={16} />
               新規プロジェクト
             </Button>

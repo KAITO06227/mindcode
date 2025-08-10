@@ -107,7 +107,7 @@ const Button = styled.button`
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   background-color: ${props => {
-    switch(props.variant) {
+    switch(props.$variant) {
       case 'primary': return '#007acc';
       case 'success': return '#28a745';
       case 'warning': return '#ffc107';
@@ -115,7 +115,7 @@ const Button = styled.button`
       default: return '#404040';
     }
   }};
-  color: ${props => props.variant === 'warning' ? '#000' : '#fff'};
+  color: ${props => props.$variant === 'warning' ? '#000' : '#fff'};
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -231,7 +231,7 @@ const GitPanel = ({ projectId }) => {
       fetchGitStatus();
       fetchBranches();
     } catch (error) {
-      alert('Failed to initialize Git repository');
+      alert('Gitリポジトリの初期化に失敗しました');
     } finally {
       setLoading(false);
     }
@@ -243,7 +243,7 @@ const GitPanel = ({ projectId }) => {
       await axios.post(`/api/git/add/${projectId}`, { files: ['.'] });
       fetchGitStatus();
     } catch (error) {
-      alert('Failed to add files');
+      alert('ファイルの追加に失敗しました');
     } finally {
       setLoading(false);
     }
@@ -251,7 +251,7 @@ const GitPanel = ({ projectId }) => {
 
   const commitChanges = async () => {
     if (!commitMessage.trim()) {
-      alert('Please enter a commit message');
+      alert('コミットメッセージを入力してください');
       return;
     }
 
@@ -264,7 +264,7 @@ const GitPanel = ({ projectId }) => {
       fetchGitStatus();
       fetchCommits();
     } catch (error) {
-      alert('Failed to commit changes');
+      alert('変更のコミットに失敗しました');
     } finally {
       setLoading(false);
     }
@@ -272,7 +272,7 @@ const GitPanel = ({ projectId }) => {
 
   const createBranch = async () => {
     if (!newBranch.trim()) {
-      alert('Please enter a branch name');
+      alert('ブランチ名を入力してください');
       return;
     }
 
@@ -284,7 +284,7 @@ const GitPanel = ({ projectId }) => {
       setNewBranch('');
       fetchBranches();
     } catch (error) {
-      alert('Failed to create branch');
+      alert('ブランチの作成に失敗しました');
     } finally {
       setLoading(false);
     }
@@ -299,7 +299,7 @@ const GitPanel = ({ projectId }) => {
       fetchBranches();
       fetchGitStatus();
     } catch (error) {
-      alert('Failed to switch branch');
+      alert('ブランチの切り替えに失敗しました');
     } finally {
       setLoading(false);
     }
@@ -307,7 +307,7 @@ const GitPanel = ({ projectId }) => {
 
   const setRemote = async () => {
     if (!remoteUrl.trim()) {
-      alert('Please enter a remote URL');
+      alert('リモートURLを入力してください');
       return;
     }
 
@@ -316,9 +316,9 @@ const GitPanel = ({ projectId }) => {
       await axios.post(`/api/git/remote/${projectId}`, {
         remoteUrl: remoteUrl
       });
-      alert('Remote URL set successfully');
+      alert('リモートURLを正常に設定しました');
     } catch (error) {
-      alert('Failed to set remote URL');
+      alert('リモートURLの設定に失敗しました');
     } finally {
       setLoading(false);
     }
@@ -331,9 +331,9 @@ const GitPanel = ({ projectId }) => {
         branch: currentBranch,
         setUpstream: true
       });
-      alert('Changes pushed successfully');
+      alert('変更を正常にプッシュしました');
     } catch (error) {
-      alert('Failed to push changes');
+      alert('変更のプッシュに失敗しました');
     } finally {
       setLoading(false);
     }
@@ -345,9 +345,9 @@ const GitPanel = ({ projectId }) => {
       await axios.post(`/api/git/pull/${projectId}`);
       fetchGitStatus();
       fetchCommits();
-      alert('Changes pulled successfully');
+      alert('変更を正常にプルしました');
     } catch (error) {
-      alert('Failed to pull changes');
+      alert('変更のプルに失敗しました');
     } finally {
       setLoading(false);
     }
@@ -379,7 +379,7 @@ const GitPanel = ({ projectId }) => {
       <Section>
         <SectionTitle>
           <FiGitBranch size={14} />
-          Repository Status
+          リポジトリステータス
           <Button size="sm" onClick={fetchGitStatus} style={{ marginLeft: 'auto', padding: '0.25rem' }}>
             <FiRefreshCw size={12} />
           </Button>
@@ -387,7 +387,7 @@ const GitPanel = ({ projectId }) => {
         
         {statusItems.length === 0 ? (
           <div style={{ fontSize: '0.75rem', color: '#888' }}>
-            Working directory clean
+            作業ディレクトリはクリーンです
           </div>
         ) : (
           statusItems.map((item, index) => (
@@ -403,13 +403,13 @@ const GitPanel = ({ projectId }) => {
         )}
         
         <ButtonGroup>
-          <Button onClick={initializeGit} disabled={loading} variant="primary">
+          <Button onClick={initializeGit} disabled={loading} $variant="primary">
             <FiSettings size={12} />
-            Init Git
+            Git初期化
           </Button>
           <Button onClick={addFiles} disabled={loading}>
             <FiPlus size={12} />
-            Stage All
+            全てステージング
           </Button>
         </ButtonGroup>
       </Section>
@@ -417,26 +417,26 @@ const GitPanel = ({ projectId }) => {
       <Section>
         <SectionTitle>
           <FiGitCommit size={14} />
-          Commit Changes
+          変更をコミット
         </SectionTitle>
         
         <TextArea
           value={commitMessage}
           onChange={(e) => setCommitMessage(e.target.value)}
-          placeholder="Enter commit message..."
+          placeholder="コミットメッセージを入力..."
           disabled={loading}
         />
         
-        <Button onClick={commitChanges} disabled={loading || !commitMessage.trim()} variant="success">
+        <Button onClick={commitChanges} disabled={loading || !commitMessage.trim()} $variant="success">
           <FiGitCommit size={12} />
-          Commit
+          コミット
         </Button>
       </Section>
 
       <Section>
         <SectionTitle>
           <FiGitBranch size={14} />
-          Branches
+          ブランチ
         </SectionTitle>
         
         <BranchList>
@@ -447,7 +447,7 @@ const GitPanel = ({ projectId }) => {
               onClick={() => !branch.includes('*') && switchBranch(branch)}
             >
               <span>{branch}</span>
-              {branch.includes('*') && <span style={{ color: '#007acc' }}>current</span>}
+              {branch.includes('*') && <span style={{ color: '#007acc' }}>現在</span>}
             </BranchItem>
           ))}
         </BranchList>
@@ -455,19 +455,19 @@ const GitPanel = ({ projectId }) => {
         <Input
           value={newBranch}
           onChange={(e) => setNewBranch(e.target.value)}
-          placeholder="New branch name..."
+          placeholder="新しいブランチ名..."
           disabled={loading}
         />
         
         <Button onClick={createBranch} disabled={loading || !newBranch.trim()}>
           <FiPlus size={12} />
-          Create Branch
+          ブランチ作成
         </Button>
       </Section>
 
       <Section>
         <SectionTitle>
-          Remote Repository
+          リモートリポジトリ
         </SectionTitle>
         
         <Input
@@ -480,21 +480,21 @@ const GitPanel = ({ projectId }) => {
         <ButtonGroup>
           <Button onClick={setRemote} disabled={loading || !remoteUrl.trim()}>
             <FiSettings size={12} />
-            Set Remote
+            リモート設定
           </Button>
-          <Button onClick={pushChanges} disabled={loading} variant="warning">
+          <Button onClick={pushChanges} disabled={loading} $variant="warning">
             <FiUpload size={12} />
-            Push
+            プッシュ
           </Button>
           <Button onClick={pullChanges} disabled={loading}>
             <FiDownload size={12} />
-            Pull
+            プル
           </Button>
         </ButtonGroup>
       </Section>
 
       <Section>
-        <SectionTitle>Recent Commits</SectionTitle>
+        <SectionTitle>最近のコミット</SectionTitle>
         <CommitList>
           {commits.map((commit, index) => (
             <CommitItem key={index}>
