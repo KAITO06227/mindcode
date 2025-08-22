@@ -1,0 +1,15 @@
+{
+  "watch": [
+    "server/"
+  ],
+  "ignore": [
+    "user_projects/**",
+    "node_modules/**",
+    "client/**",
+    "*.log"
+  ],
+  "ext": "js,json",
+  "env": {
+    "NODE_ENV": "development"
+  }
+}

@@ -1,4 +1,6 @@
-# MindCode - 教育用WebIDE - Claude Code Memory
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## プロジェクト概要
 **MindCode**は青山学院大学の学生・教職員向けに開発された教育用Web開発統合開発環境（IDE）です。
@@ -104,18 +106,24 @@ mindcode/
 - PATCH /:projectId/:fileId/rename - ファイルリネーム
 - POST /:projectId/upload - ファイルアップロード
 
-### Git (/api/git)
-- POST /init/:projectId - Git初期化
-- GET /status/:projectId - Git状況取得
-- POST /add/:projectId - ファイル追加
-- POST /commit/:projectId - コミット
-- GET /log/:projectId - コミット履歴
-- GET /branches/:projectId - ブランチ一覧
-- POST /branch/:projectId - ブランチ作成
-- POST /checkout/:projectId - ブランチ切り替え
-- POST /remote/:projectId - リモート設定
-- POST /push/:projectId - プッシュ
-- POST /pull/:projectId - プル
+### Version Control (/api/version-control)
+- POST /:projectId/init - Git初期化
+- GET /:projectId/status - Git状況取得
+- POST /:projectId/commit - コミット作成
+- GET /:projectId/history - コミット履歴取得
+- GET /:projectId/branches - ブランチ一覧取得
+- POST /:projectId/branch - ブランチ作成
+- POST /:projectId/checkout - ブランチ切り替え
+- GET /:projectId/diff - ファイル差分取得
+- GET /:projectId/file-at-commit - 特定コミットのファイル取得
+
+### File System (/api/filesystem)
+- POST /:projectId/files - ファイル作成・更新
+- GET /:projectId/files/:fileId - ファイル内容・メタデータ取得
+- DELETE /:projectId/files/:fileId - ファイル削除
+- GET /:projectId/tree - プロジェクトファイルツリー取得
+- POST /:projectId/upload - 複数ファイルアップロード
+- PATCH /:projectId/files/:fileId/rename - ファイルリネーム
 
 ### Claude Code (/api/claude)
 - POST /execute/:projectId - Claude Codeコマンド実行
@@ -131,22 +139,58 @@ mindcode/
 - GET /projects/:projectId/files - プロジェクトファイル取得
 - DELETE /users/:id - ユーザー削除
 
+## アーキテクチャ
+
+### 二重ファイルシステム構造
+このプロジェクトは独特の二重ファイルシステムを採用：
+
+1. **物理ファイルシステム** (`user_projects/[userId]/[projectId]/`)
+   - 実際のファイルが保存される場所
+   - Git操作の対象
+   - Monaco Editorが直接読み込む
+
+2. **データベースファイルシステム** (拡張project_files テーブル)
+   - ファイルメタデータ（権限、チェックサム、バージョン）
+   - アクセスログとバージョン履歴
+   - 検索とインデックス機能
+
+### Git統合戦略
+- `GitManager`クラス（`server/utils/gitManager.js`）が物理ファイルの Git 操作を担当
+- データベース内の`file_versions`テーブルがGitコミットハッシュと連携
+- エラー処理は厳格モード：失敗時は操作を中止（グレースフル・デグラデーション無し）
+
+### API設計パターン
+- **Legacy API** (`/api/files`): 従来のシンプルなファイル操作
+- **Enhanced API** (`/api/filesystem`): メタデータ・バージョン管理対応
+- **Version Control API** (`/api/version-control`): Git専用操作
+- プロジェクトによりレガシー/拡張スキーマの自動フォールバック
+
 ## データベース設計
 
-### users テーブル
-- id (PK), google_id, email, name, role, avatar_url, created_at, updated_at
+### 拡張ファイルシステムスキーマ（必須）
+```sql
+-- 拡張project_filesテーブル（メタデータ・バージョン管理）
+project_files: id, project_id, file_path, file_name, content, file_type, 
+               file_size, permissions, checksum, is_binary, created_by, updated_by
 
-### projects テーブル
-- id (PK), user_id (FK), name, description, git_url, created_at, updated_at
+-- ファイルバージョン履歴
+file_versions: id, file_id, version_number, git_commit_hash, content_diff,
+               file_size, checksum, change_type, change_summary, created_by
 
-### project_files テーブル
-- id (PK), project_id (FK), file_path, file_name, content, file_type, created_at, updated_at
+-- ファイルアクセスログ
+file_access_logs: id, file_id, user_id, access_type, ip_address, user_agent
 
-### claude_sessions テーブル
-- id (PK), user_id (FK), project_id (FK), session_data, created_at, updated_at
+-- Git リポジトリ情報
+git_repositories: id, project_id, is_initialized, current_branch, last_commit_hash,
+                  remote_url, git_user_name, git_user_email
+```
 
-### git_commits テーブル
-- id (PK), project_id (FK), commit_hash, commit_message, commit_author, commit_date, created_at
+### コアテーブル
+```sql
+users: id, google_id, email, name, role, avatar_url
+projects: id, user_id, name, description, git_url  
+claude_sessions: id, user_id, project_id, session_data
+```
 
 ## 環境変数
 ```
@@ -170,24 +214,27 @@ DB_PASSWORD=password
 - **ユーザーがサーバーを起動・管理します**
 - Claude Codeの役割はコードの編集・修正・分析のみです
 
+**⚠️ 重要: エラー処理の方針**
+- **エラー発生時は厳格に失敗させる（グレースフル・デグラデーション禁止）**
+- **「エラーでも動く」修正は行わず、根本原因の修正に専念**
+- **データベーススキーマ未適用時は詳細エラーを返す**
+
 ```bash
-# 全体のセットアップ
+# 依存関係のインストール
 npm run install:all
 
-# 🚫 禁止: Claude Codeによるサーバー起動
-# npm run dev
-# docker compose up
-# npm run server:dev
-# npm run client:dev
-
-# プロダクションビルド
+# プロダクションビルド  
 npm run build
 
-# ✅ Claude Codeが実行可能なコマンド
-# - ファイルの読み書き
-# - コードの分析・修正
-# - データベーススキーマの確認
-# - 設定ファイルの編集
+# データベーススキーマ適用
+mysql -u root -p webide < server/database/init.sql
+mysql -u root -p webide < server/database/file_system_schema.sql
+
+# Docker環境でのデータベース初期化
+docker-compose exec db mysql -u root -ppassword webide < /docker-entrypoint-initdb.d/init.sql
+
+# 🚫 Claude Code実行禁止コマンド
+# npm run dev, docker compose up, npm run server:dev, npm run client:dev
 ```
 
 ## 特記事項
@@ -209,39 +256,41 @@ npm run build
 - ファイルアップロードの制限なし（フォルダアップロードも対応）
 - JWTトークンでの認証
 
-## 進捗状況
-✅ 完了済み：
-- プロジェクト構造の設計とDocker環境構築
-- Node.js Express サーバーセットアップ
-- Google OAuth認証実装
-- MySQL データベース設計と接続
-- 全APIエンドポイントの実装（auth, projects, files, git, claude, admin）
-- React基本構造とAuthContextの設定
-- DashboardPageの実装（プロジェクト一覧、作成機能）
-- IDEPageの基本レイアウト実装
-- Monaco Editorの統合（シンタックスハイライト、テーマ設定）
-- ファイルツリーコンポーネント（CRUD操作、アップロード機能）
-- スモールブラウザコンポーネント（pikeplaceを参考にした実装）
-- Claude Code統合（xterm.jsを使用したターミナル）
-- GitPanelコンポーネント（Git操作GUI）
-- AdminPageの実装（ユーザー・プロジェクト管理）
+## 重要な実装詳細
 
-🔧 実装完了項目の詳細：
+### ファイル操作の流れ
+1. **プロジェクト作成時**: 物理ディレクトリ作成 → 初期ファイル生成 → データベース記録
+2. **ファイル編集時**: 物理ファイル更新 → データベース更新 → バージョン記録 → Git コミット（オプション）
+3. **Git操作時**: GitManager経由で物理ファイル操作 → データベース同期
 
-### フロントエンドコンポーネント
-1. **LoginPage**: Google OAuth ログイン画面
-2. **DashboardPage**: プロジェクト一覧、作成機能
-3. **IDEPage**: メインのIDE画面レイアウト
-4. **CodeEditor**: Monaco Editor統合
-5. **FileTree**: ファイル・フォルダ管理（ツリー表示、CRUD操作）
-6. **SmallBrowser**: プレビュー機能（HTML/CSS/JS統合表示）
-7. **Terminal**: Claude Code統合ターミナル（xterm.js）
-8. **GitPanel**: Git操作パネル
-9. **AdminPage**: 先生用管理画面
-10. **CreateProjectModal**: プロジェクト作成モーダル
+### 認証・認可パターン
+- `verifyToken` ミドルウェアで JWT 検証
+- プロジェクト所有者チェックを各APIで実行
+- Google OAuth制限: `@gsuite.si.aoyama.ac.jp` ドメインのみ
 
-⏳ 次のステップ：
-- 開発環境でのテスト実行
-- バグ修正と機能調整
-- Docker環境での動作確認
-- 本番環境デプロイ準備
+### エラー処理の実装
+- データベーススキーマエラー時は詳細メッセージ付きで500エラー
+- Git初期化失敗時は具体的なstdout/stderrを含む  
+- ファイルシステム操作失敗時は物理的原因を報告
+
+### フロントエンド統合ポイント  
+- `GitPanel` コンポーネントが Version Control API を呼び出し
+- `FileTree` コンポーネントが File System API と Legacy File API の両方に対応
+- Monaco Editor は物理ファイルパスから直接読み込み
+
+### データベース移行が必要な機能
+拡張ファイルシステムスキーマ（`server/database/file_system_schema.sql`）を適用する必要があります：
+- Git統合機能
+- ファイルバージョン管理  
+- アクセスログ機能
+- メタデータ追跡
+
+### コンポーネント構造
+**主要React コンポーネント**:
+- `LoginPage`: Google OAuth認証
+- `DashboardPage`: プロジェクト一覧・作成
+- `IDEPage`: メインIDE画面
+- `FileTree`: ファイル管理（CRUD、アップロード対応）
+- `GitPanel`: バージョン管理GUI  
+- `SmallBrowser`: HTML/CSS/JSプレビュー
+- `AdminPage`: 教師用管理機能

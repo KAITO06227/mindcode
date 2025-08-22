@@ -1,130 +1,64 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
 import {
   FiGitBranch,
   FiGitCommit,
-  FiUpload,
-  FiDownload,
-  FiPlus,
+  FiClock,
+  FiUser,
   FiRefreshCw,
-  FiSettings
+  FiPlus,
+  FiChevronDown,
+  FiChevronRight,
+  FiCode
 } from 'react-icons/fi';
 
-const GitContainer = styled.div`
-  height: 100%;
+const Panel = styled.div`
   display: flex;
   flex-direction: column;
+  height: 100%;
   background-color: #1e1e1e;
-  color: #cccccc;
+  border: 1px solid #404040;
 `;
 
-const Section = styled.div`
+const Header = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem;
   border-bottom: 1px solid #404040;
-  padding: 1rem;
-
-  &:last-child {
-    border-bottom: none;
-    flex: 1;
-  }
+  background-color: #252526;
 `;
 
-const SectionTitle = styled.h4`
-  color: #ffffff;
+const Title = styled.h3`
+  margin: 0;
   font-size: 0.875rem;
-  margin: 0 0 0.75rem 0;
+  font-weight: 500;
+  color: #cccccc;
   display: flex;
   align-items: center;
   gap: 0.5rem;
 `;
 
-const StatusItem = styled.div`
+const Controls = styled.div`
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.5rem;
-  background-color: ${props => props.type === 'modified' ? '#4a3c00' : 
-                                  props.type === 'added' ? '#0f3d0f' : 
-                                  props.type === 'deleted' ? '#4a0000' : '#2a2a2a'};
-  border-radius: 4px;
-  margin: 0.25rem 0;
-  font-size: 0.75rem;
-`;
-
-const StatusIndicator = styled.span`
-  color: ${props => props.type === 'modified' ? '#ffd700' : 
-                     props.type === 'added' ? '#00ff00' : 
-                     props.type === 'deleted' ? '#ff6b6b' : '#cccccc'};
-  font-weight: bold;
-  margin-right: 0.5rem;
-`;
-
-const Input = styled.input`
-  width: 100%;
-  background-color: #3c3c3c;
-  border: 1px solid #555;
-  color: #ffffff;
-  padding: 0.5rem;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  margin: 0.5rem 0;
-
-  &:focus {
-    outline: none;
-    border-color: #007acc;
-  }
-
-  &::placeholder {
-    color: #888;
-  }
-`;
-
-const TextArea = styled.textarea`
-  width: 100%;
-  background-color: #3c3c3c;
-  border: 1px solid #555;
-  color: #ffffff;
-  padding: 0.5rem;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  margin: 0.5rem 0;
-  resize: vertical;
-  min-height: 60px;
-
-  &:focus {
-    outline: none;
-    border-color: #007acc;
-  }
-
-  &::placeholder {
-    color: #888;
-  }
+  gap: 0.25rem;
 `;
 
 const Button = styled.button`
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  background-color: ${props => {
-    switch(props.$variant) {
-      case 'primary': return '#007acc';
-      case 'success': return '#28a745';
-      case 'warning': return '#ffc107';
-      case 'danger': return '#dc3545';
-      default: return '#404040';
-    }
-  }};
-  color: ${props => props.$variant === 'warning' ? '#000' : '#fff'};
-  border: none;
+  background: ${props => props.$primary ? '#007acc' : 'none'};
+  border: 1px solid ${props => props.$primary ? '#007acc' : '#404040'};
+  color: ${props => props.$primary ? '#ffffff' : '#cccccc'};
+  padding: 0.25rem 0.5rem;
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.75rem;
-  margin: 0.25rem 0.25rem 0.25rem 0;
-  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
 
   &:hover:not(:disabled) {
-    opacity: 0.9;
+    background-color: ${props => props.$primary ? '#005a9e' : '#404040'};
   }
 
   &:disabled {
@@ -133,377 +67,489 @@ const Button = styled.button`
   }
 `;
 
-const ButtonGroup = styled.div`
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
-  margin: 0.5rem 0;
-`;
-
-const BranchList = styled.div`
-  max-height: 150px;
+const Content = styled.div`
+  flex: 1;
   overflow-y: auto;
+  padding: 0.5rem;
 `;
 
-const BranchItem = styled.div`
-  padding: 0.5rem;
-  background-color: ${props => props.active ? '#094771' : '#2a2a2a'};
-  border-radius: 4px;
-  margin: 0.25rem 0;
-  font-size: 0.75rem;
-  cursor: pointer;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+const Section = styled.div`
+  margin-bottom: 1rem;
+`;
 
+const SectionHeader = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #cccccc;
+  text-transform: uppercase;
+  cursor: pointer;
+  
   &:hover {
-    background-color: ${props => props.active ? '#094771' : '#404040'};
+    color: #ffffff;
   }
 `;
 
-const CommitList = styled.div`
-  max-height: 200px;
-  overflow-y: auto;
-`;
-
-const CommitItem = styled.div`
+const StatusBar = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   padding: 0.5rem;
-  border-left: 3px solid #007acc;
-  margin: 0.5rem 0;
-  background-color: #2a2a2a;
-  border-radius: 0 4px 4px 0;
+  background-color: ${props => props.$hasChanges ? '#4a3d00' : '#1a4a1a'};
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
   font-size: 0.75rem;
 `;
 
-const GitPanel = ({ projectId }) => {
+const StatusIcon = styled.div`
+  color: ${props => props.$hasChanges ? '#ffd700' : '#4caf50'};
+`;
+
+const CommitList = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+`;
+
+const CommitItem = styled.div`
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background-color: #252526;
+  border-radius: 4px;
+  border-left: 3px solid ${props => props.$isCurrent ? '#007acc' : '#404040'};
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover {
+    background-color: #2d2d30;
+  }
+`;
+
+const CommitIcon = styled.div`
+  color: ${props => props.$isCurrent ? '#007acc' : '#cccccc'};
+  margin-top: 0.125rem;
+`;
+
+const CommitDetails = styled.div`
+  flex: 1;
+  min-width: 0;
+`;
+
+const CommitMessage = styled.div`
+  color: #cccccc;
+  font-size: 0.75rem;
+  font-weight: 500;
+  margin-bottom: 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const CommitMeta = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.625rem;
+  color: #999999;
+`;
+
+const Input = styled.input`
+  background-color: #3c3c3c;
+  border: 1px solid #404040;
+  color: #ffffff;
+  padding: 0.375rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  width: 100%;
+  margin: 0.25rem 0;
+
+  &:focus {
+    outline: none;
+    border-color: #007acc;
+  }
+
+  &::placeholder {
+    color: #999999;
+  }
+`;
+
+const TextArea = styled.textarea`
+  background-color: #3c3c3c;
+  border: 1px solid #404040;
+  color: #ffffff;
+  padding: 0.375rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  width: 100%;
+  min-height: 60px;
+  resize: vertical;
+  font-family: inherit;
+  margin: 0.25rem 0;
+
+  &:focus {
+    outline: none;
+    border-color: #007acc;
+  }
+
+  &::placeholder {
+    color: #999999;
+  }
+`;
+
+const BranchInfo = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  background-color: #252526;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: #cccccc;
+  margin-bottom: 0.5rem;
+`;
+
+const GitPanel = ({ projectId, onRefresh }) => {
   const [status, setStatus] = useState(null);
+  const [history, setHistory] = useState([]);
   const [branches, setBranches] = useState([]);
-  const [commits, setCommits] = useState([]);
   const [loading, setLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
-  const [newBranch, setNewBranch] = useState('');
-  const [remoteUrl, setRemoteUrl] = useState('');
-  const [currentBranch, setCurrentBranch] = useState('main');
+  const [newBranchName, setNewBranchName] = useState('');
+  const [showCommitForm, setShowCommitForm] = useState(false);
+  const [showBranchForm, setShowBranchForm] = useState(false);
 
-  useEffect(() => {
-    fetchGitStatus();
-    fetchBranches();
-    fetchCommits();
-  }, [projectId]);
-
-  const fetchGitStatus = async () => {
+  // Gitデータの取得（初期化は行わない）
+  const fetchGitData = useCallback(async () => {
+    if (!projectId || loading) return;
+    
     try {
-      const response = await axios.get(`/api/git/status/${projectId}`);
-      setStatus(response.data.output);
-    } catch (error) {
-      console.error('Error fetching git status:', error);
-    }
-  };
-
-  const fetchBranches = async () => {
-    try {
-      const response = await axios.get(`/api/git/branches/${projectId}`);
-      setBranches(response.data.output.split('\n').filter(b => b.trim()));
+      setLoading(true);
       
-      // Extract current branch
-      const current = response.data.output.split('\n').find(b => b.startsWith('*'));
-      if (current) {
-        setCurrentBranch(current.replace('* ', '').trim());
-      }
+      // データを並列で取得
+      const [statusRes, historyRes, branchesRes] = await Promise.all([
+        axios.get(`/api/version-control/${projectId}/status`).catch(() => ({ data: { initialized: false } })),
+        axios.get(`/api/version-control/${projectId}/history?limit=10`).catch(() => ({ data: [] })),
+        axios.get(`/api/version-control/${projectId}/branches`).catch(() => ({ data: [] }))
+      ]);
+      
+      setStatus(statusRes.data);
+      setHistory(historyRes.data || []);
+      setBranches(branchesRes.data || []);
+      
     } catch (error) {
-      console.error('Error fetching branches:', error);
-    }
-  };
-
-  const fetchCommits = async () => {
-    try {
-      const response = await axios.get(`/api/git/log/${projectId}`);
-      setCommits(response.data.output.split('\n').filter(c => c.trim()));
-    } catch (error) {
-      console.error('Error fetching commits:', error);
-    }
-  };
-
-  const initializeGit = async () => {
-    setLoading(true);
-    try {
-      await axios.post(`/api/git/init/${projectId}`);
-      fetchGitStatus();
-      fetchBranches();
-    } catch (error) {
-      alert('Gitリポジトリの初期化に失敗しました');
+      console.error('Git data fetch error:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId, loading]);
 
-  const addFiles = async () => {
-    setLoading(true);
-    try {
-      await axios.post(`/api/git/add/${projectId}`, { files: ['.'] });
-      fetchGitStatus();
-    } catch (error) {
-      alert('ファイルの追加に失敗しました');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const commitChanges = async () => {
+  // コミット作成
+  const handleCommit = async () => {
     if (!commitMessage.trim()) {
       alert('コミットメッセージを入力してください');
       return;
     }
 
-    setLoading(true);
     try {
-      await axios.post(`/api/git/commit/${projectId}`, {
-        message: commitMessage
+      setLoading(true);
+      
+      await axios.post(`/api/version-control/${projectId}/commit`, {
+        message: commitMessage.trim()
       });
+      
       setCommitMessage('');
-      fetchGitStatus();
-      fetchCommits();
+      setShowCommitForm(false);
+      await fetchGitData();
+      
+      if (onRefresh) {
+        onRefresh(); // ファイルツリーをリフレッシュ
+      }
+      
     } catch (error) {
-      alert('変更のコミットに失敗しました');
+      console.error('Commit error:', error);
+      alert('コミットエラー: ' + (error.response?.data?.message || error.message));
     } finally {
       setLoading(false);
     }
   };
 
-  const createBranch = async () => {
-    if (!newBranch.trim()) {
+  // ブランチ作成
+  const handleCreateBranch = async () => {
+    if (!newBranchName.trim()) {
       alert('ブランチ名を入力してください');
       return;
     }
 
-    setLoading(true);
     try {
-      await axios.post(`/api/git/branch/${projectId}`, {
-        branchName: newBranch
+      setLoading(true);
+      
+      await axios.post(`/api/version-control/${projectId}/branch`, {
+        branchName: newBranchName.trim()
       });
-      setNewBranch('');
-      fetchBranches();
+      
+      setNewBranchName('');
+      setShowBranchForm(false);
+      await fetchGitData();
+      
     } catch (error) {
-      alert('ブランチの作成に失敗しました');
+      console.error('Branch creation error:', error);
+      alert('ブランチ作成エラー: ' + (error.response?.data?.message || error.message));
     } finally {
       setLoading(false);
     }
   };
 
-  const switchBranch = async (branchName) => {
-    setLoading(true);
+  // ブランチ切り替え
+  const handleSwitchBranch = async (branchName) => {
     try {
-      await axios.post(`/api/git/checkout/${projectId}`, {
-        branchName: branchName.replace('* ', '').trim()
+      setLoading(true);
+      
+      await axios.post(`/api/version-control/${projectId}/checkout`, {
+        branchName
       });
-      fetchBranches();
-      fetchGitStatus();
+      
+      await fetchGitData();
+      
+      if (onRefresh) {
+        onRefresh(); // ファイルツリーをリフレッシュ
+      }
+      
     } catch (error) {
-      alert('ブランチの切り替えに失敗しました');
+      console.error('Branch switch error:', error);
+      alert('ブランチ切り替えエラー: ' + (error.response?.data?.message || error.message));
     } finally {
       setLoading(false);
     }
   };
 
-  const setRemote = async () => {
-    if (!remoteUrl.trim()) {
-      alert('リモートURLを入力してください');
+  // コミットに復元
+  const handleRestoreCommit = async (commit) => {
+    if (!window.confirm(`コミット "${commit.message}" にファイルを復元しますか？\n現在の変更は失われる可能性があります。`)) {
       return;
     }
 
-    setLoading(true);
     try {
-      await axios.post(`/api/git/remote/${projectId}`, {
-        remoteUrl: remoteUrl
+      setLoading(true);
+      
+      const response = await axios.post(`/api/version-control/${projectId}/restore`, {
+        commitHash: commit.hash
       });
-      alert('リモートURLを正常に設定しました');
+      
+      alert(`復元完了: ${response.data.restoredCount} ファイルが復元されました`);
+      
+      if (onRefresh) {
+        onRefresh(); // ファイルツリーをリフレッシュ
+      }
+      
     } catch (error) {
-      alert('リモートURLの設定に失敗しました');
+      console.error('Restore error:', error);
+      alert('復元エラー: ' + (error.response?.data?.message || error.message));
     } finally {
       setLoading(false);
     }
   };
 
-  const pushChanges = async () => {
-    setLoading(true);
-    try {
-      await axios.post(`/api/git/push/${projectId}`, {
-        branch: currentBranch,
-        setUpstream: true
-      });
-      alert('変更を正常にプッシュしました');
-    } catch (error) {
-      alert('変更のプッシュに失敗しました');
-    } finally {
-      setLoading(false);
+  // 初回データ読み込み
+  useEffect(() => {
+    if (projectId) {
+      fetchGitData();
     }
-  };
+  }, [projectId, fetchGitData]);
 
-  const pullChanges = async () => {
-    setLoading(true);
-    try {
-      await axios.post(`/api/git/pull/${projectId}`);
-      fetchGitStatus();
-      fetchCommits();
-      alert('変更を正常にプルしました');
-    } catch (error) {
-      alert('変更のプルに失敗しました');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const parseGitStatus = (statusText) => {
-    if (!statusText) return [];
+  // 相対時間の計算
+  const getRelativeTime = (date) => {
+    const now = new Date();
+    const diffMs = now - new Date(date);
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
     
-    return statusText.split('\n')
-      .filter(line => line.trim())
-      .map(line => {
-        const status = line.substring(0, 2);
-        const file = line.substring(3);
-        let type = 'unknown';
-        
-        if (status.includes('M')) type = 'modified';
-        else if (status.includes('A')) type = 'added';
-        else if (status.includes('D')) type = 'deleted';
-        else if (status.includes('??')) type = 'untracked';
-        
-        return { file, type, status };
-      });
+    if (diffMins < 1) return 'たった今';
+    if (diffMins < 60) return `${diffMins}分前`;
+    if (diffHours < 24) return `${diffHours}時間前`;
+    if (diffDays < 7) return `${diffDays}日前`;
+    
+    return new Date(date).toLocaleDateString('ja-JP');
   };
-
-  const statusItems = parseGitStatus(status);
 
   return (
-    <GitContainer>
-      <Section>
-        <SectionTitle>
-          <FiGitBranch size={14} />
-          リポジトリステータス
-          <Button size="sm" onClick={fetchGitStatus} style={{ marginLeft: 'auto', padding: '0.25rem' }}>
-            <FiRefreshCw size={12} />
+    <Panel>
+      <Header>
+        <Title>
+          <FiGitBranch />
+          Git バージョン管理
+        </Title>
+        <Controls>
+          <Button onClick={fetchGitData} disabled={loading} title="リフレッシュ">
+            <FiRefreshCw />
           </Button>
-        </SectionTitle>
-        
-        {statusItems.length === 0 ? (
-          <div style={{ fontSize: '0.75rem', color: '#888' }}>
-            作業ディレクトリはクリーンです
-          </div>
-        ) : (
-          statusItems.map((item, index) => (
-            <StatusItem key={index} type={item.type}>
+          <Button 
+            $primary 
+            onClick={() => setShowCommitForm(!showCommitForm)}
+            disabled={loading || !status?.initialized}
+            title="コミット作成"
+          >
+            <FiGitCommit />
+          </Button>
+        </Controls>
+      </Header>
+
+      <Content>
+        {/* Git状態表示 */}
+        {status && (
+          <Section>
+            <StatusBar $hasChanges={status.hasChanges}>
+              <StatusIcon $hasChanges={status.hasChanges}>
+                {status.hasChanges ? <FiClock /> : <FiGitCommit />}
+              </StatusIcon>
               <span>
-                <StatusIndicator type={item.type}>
-                  {item.status}
-                </StatusIndicator>
-                {item.file}
+                {status.hasChanges 
+                  ? `変更あり (${status.changes?.length || 0}ファイル)` 
+                  : '変更なし'
+                }
               </span>
-            </StatusItem>
-          ))
+            </StatusBar>
+
+            {/* 現在のブランチ */}
+            {status.branch && (
+              <BranchInfo>
+                <FiGitBranch />
+                <strong>{status.branch}</strong>
+              </BranchInfo>
+            )}
+          </Section>
         )}
-        
-        <ButtonGroup>
-          <Button onClick={initializeGit} disabled={loading} $variant="primary">
-            <FiSettings size={12} />
-            Git初期化
-          </Button>
-          <Button onClick={addFiles} disabled={loading}>
-            <FiPlus size={12} />
-            全てステージング
-          </Button>
-        </ButtonGroup>
-      </Section>
 
-      <Section>
-        <SectionTitle>
-          <FiGitCommit size={14} />
-          変更をコミット
-        </SectionTitle>
-        
-        <TextArea
-          value={commitMessage}
-          onChange={(e) => setCommitMessage(e.target.value)}
-          placeholder="コミットメッセージを入力..."
-          disabled={loading}
-        />
-        
-        <Button onClick={commitChanges} disabled={loading || !commitMessage.trim()} $variant="success">
-          <FiGitCommit size={12} />
-          コミット
-        </Button>
-      </Section>
+        {/* コミットフォーム */}
+        {showCommitForm && (
+          <Section>
+            <SectionHeader>新しいコミット</SectionHeader>
+            <TextArea
+              value={commitMessage}
+              onChange={(e) => setCommitMessage(e.target.value)}
+              placeholder="コミットメッセージを入力..."
+              rows={3}
+            />
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <Button $primary onClick={handleCommit} disabled={loading}>
+                コミット
+              </Button>
+              <Button onClick={() => setShowCommitForm(false)}>
+                キャンセル
+              </Button>
+            </div>
+          </Section>
+        )}
 
-      <Section>
-        <SectionTitle>
-          <FiGitBranch size={14} />
-          ブランチ
-        </SectionTitle>
-        
-        <BranchList>
-          {branches.map((branch, index) => (
-            <BranchItem
-              key={index}
-              active={branch.includes('*')}
-              onClick={() => !branch.includes('*') && switchBranch(branch)}
+        {/* ブランチ管理 */}
+        <Section>
+          <SectionHeader
+            onClick={() => setShowBranchForm(!showBranchForm)}
+          >
+            {showBranchForm ? <FiChevronDown /> : <FiChevronRight />}
+            ブランチ ({branches.length})
+            <Button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowBranchForm(!showBranchForm);
+              }}
             >
-              <span>{branch}</span>
-              {branch.includes('*') && <span style={{ color: '#007acc' }}>現在</span>}
-            </BranchItem>
-          ))}
-        </BranchList>
-        
-        <Input
-          value={newBranch}
-          onChange={(e) => setNewBranch(e.target.value)}
-          placeholder="新しいブランチ名..."
-          disabled={loading}
-        />
-        
-        <Button onClick={createBranch} disabled={loading || !newBranch.trim()}>
-          <FiPlus size={12} />
-          ブランチ作成
-        </Button>
-      </Section>
+              <FiPlus />
+            </Button>
+          </SectionHeader>
+          
+          {showBranchForm && (
+            <>
+              <Input
+                value={newBranchName}
+                onChange={(e) => setNewBranchName(e.target.value)}
+                placeholder="新しいブランチ名..."
+              />
+              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                <Button $primary onClick={handleCreateBranch} disabled={loading}>
+                  作成
+                </Button>
+                <Button onClick={() => setShowBranchForm(false)}>
+                  キャンセル
+                </Button>
+              </div>
+            </>
+          )}
 
-      <Section>
-        <SectionTitle>
-          リモートリポジトリ
-        </SectionTitle>
-        
-        <Input
-          value={remoteUrl}
-          onChange={(e) => setRemoteUrl(e.target.value)}
-          placeholder="https://github.com/user/repo.git"
-          disabled={loading}
-        />
-        
-        <ButtonGroup>
-          <Button onClick={setRemote} disabled={loading || !remoteUrl.trim()}>
-            <FiSettings size={12} />
-            リモート設定
-          </Button>
-          <Button onClick={pushChanges} disabled={loading} $variant="warning">
-            <FiUpload size={12} />
-            プッシュ
-          </Button>
-          <Button onClick={pullChanges} disabled={loading}>
-            <FiDownload size={12} />
-            プル
-          </Button>
-        </ButtonGroup>
-      </Section>
+          {/* ブランチ一覧 */}
+          <div style={{ marginTop: '0.5rem' }}>
+            {branches.map((branch) => (
+              <CommitItem
+                key={branch.name}
+                $isCurrent={branch.current}
+                onClick={() => !branch.current && handleSwitchBranch(branch.name)}
+                style={{ cursor: branch.current ? 'default' : 'pointer' }}
+              >
+                <CommitIcon $isCurrent={branch.current}>
+                  <FiGitBranch />
+                </CommitIcon>
+                <CommitDetails>
+                  <CommitMessage>
+                    {branch.name} {branch.current && '(現在)'}
+                  </CommitMessage>
+                </CommitDetails>
+              </CommitItem>
+            ))}
+          </div>
+        </Section>
 
-      <Section>
-        <SectionTitle>最近のコミット</SectionTitle>
-        <CommitList>
-          {commits.map((commit, index) => (
-            <CommitItem key={index}>
-              {commit}
-            </CommitItem>
-          ))}
-        </CommitList>
-      </Section>
-    </GitContainer>
+        {/* コミット履歴 */}
+        <Section>
+          <SectionHeader>
+            履歴 ({history.length})
+          </SectionHeader>
+          <CommitList>
+            {history.map((commit, index) => (
+              <CommitItem
+                key={commit.hash}
+                $isCurrent={index === 0}
+                onClick={() => handleRestoreCommit(commit)}
+                style={{ cursor: 'pointer' }}
+                title="クリックでこのコミットに復元"
+              >
+                <CommitIcon $isCurrent={index === 0}>
+                  <FiGitCommit />
+                </CommitIcon>
+                <CommitDetails>
+                  <CommitMessage title={commit.message}>
+                    {commit.message}
+                  </CommitMessage>
+                  <CommitMeta>
+                    <FiUser size={10} />
+                    <span>{commit.author}</span>
+                    <FiClock size={10} />
+                    <span>{getRelativeTime(commit.date)}</span>
+                    <FiCode size={10} />
+                    <span>{commit.hash.substring(0, 7)}</span>
+                  </CommitMeta>
+                </CommitDetails>
+              </CommitItem>
+            ))}
+          </CommitList>
+        </Section>
+
+        {loading && (
+          <div style={{ 
+            textAlign: 'center', 
+            padding: '1rem', 
+            color: '#999999',
+            fontSize: '0.75rem'
+          }}>
+            読み込み中...
+          </div>
+        )}
+      </Content>
+    </Panel>
   );
 };
 

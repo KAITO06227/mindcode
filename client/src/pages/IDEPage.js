@@ -1,16 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
-import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
 import { 
   FiArrowLeft, 
-  FiSave
+  FiSave,
+  FiFolder,
+  FiGitBranch
 } from 'react-icons/fi';
 import FileTree from '../components/FileTree';
 import CodeEditor from '../components/CodeEditor';
 import SmallBrowser from '../components/SmallBrowser';
-import Terminal from '../components/Terminal';
+import ClaudeCodeTerminal from '../components/ClaudeCodeTerminal';
 import GitPanel from '../components/GitPanel';
 
 const IDEContainer = styled.div`
@@ -161,6 +162,8 @@ const TabBar = styled.div`
 `;
 
 const Tab = styled.button`
+  display: flex;
+  align-items: center;
   padding: 0.75rem 1rem;
   background: none;
   border: none;
@@ -168,6 +171,7 @@ const Tab = styled.button`
   cursor: pointer;
   font-size: 0.875rem;
   border-bottom: 2px solid ${props => props.$active ? '#007acc' : 'transparent'};
+  transition: all 0.2s;
 
   &:hover {
     background-color: #404040;
@@ -178,19 +182,18 @@ const Tab = styled.button`
 const IDEPage = () => {
   const { projectId } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
   
   const [project, setProject] = useState(null);
   const [fileTree, setFileTree] = useState({});
   const [selectedFile, setSelectedFile] = useState(null);
-  // Remove tab state - show terminal and preview simultaneously
-  // const [activeRightTab, setActiveRightTab] = useState('preview');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [activeTab, setActiveTab] = useState('files'); // 'files' or 'git'
 
   useEffect(() => {
     fetchProject();
     fetchFileTree();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   const fetchProject = async () => {
@@ -217,12 +220,23 @@ const IDEPage = () => {
   const fetchFileTree = async () => {
     try {
       console.log('Fetching file tree for project ID:', projectId);
-      const response = await axios.get(`/api/files/tree/${projectId}`);
+      const response = await axios.get(`/api/filesystem/${projectId}/tree`);
       console.log('File tree fetched successfully:', response.data);
       setFileTree(response.data);
       
-      // Select index.html by default if available
-      if (response.data.index && response.data.index.html) {
+      // 現在選択中のファイルがある場合は、そのファイルの内容を再読み込み
+      if (selectedFile) {
+        try {
+          const fileResponse = await axios.get(`/api/files/${projectId}/${selectedFile.id}`);
+          setSelectedFile(fileResponse.data);
+          console.log('Current file reloaded after tree update');
+        } catch (fileError) {
+          console.error('Error reloading current file:', fileError);
+        }
+      }
+      
+      // Select index.html by default if available and no file is selected
+      if (!selectedFile && response.data.index && response.data.index.html) {
         setSelectedFile(response.data['index.html']);
       }
     } catch (error) {
@@ -238,7 +252,7 @@ const IDEPage = () => {
   const handleFileSelect = async (file) => {
     if (file.type === 'file') {
       try {
-        const response = await axios.get(`/api/files/${projectId}/${file.id}`);
+        const response = await axios.get(`/api/filesystem/${projectId}/files/${file.id}`);
         setSelectedFile(response.data);
       } catch (error) {
         console.error('Error fetching file content:', error);
@@ -251,9 +265,34 @@ const IDEPage = () => {
     
     setSaving(true);
     try {
-      await axios.put(`/api/files/${projectId}/${selectedFile.id}`, {
+      console.log('Saving file:', {
+        fileId: selectedFile.id,
+        fileName: selectedFile.file_name,
+        filePath: selectedFile.file_path,
         content: selectedFile.content
       });
+      
+      if (selectedFile.id) {
+        // 既存ファイルの場合は、file_pathをそのまま使用
+        await axios.post(`/api/filesystem/${projectId}/files`, {
+          fileName: selectedFile.file_name,
+          filePath: selectedFile.file_path,
+          content: selectedFile.content,
+          autoCommit: true
+        });
+      } else {
+        // 新規ファイルの場合（通常このケースはないはず）
+        const pathParts = selectedFile.file_path.split('/');
+        pathParts.pop(); // ファイル名を除去
+        const parentPath = pathParts.join('/');
+        
+        await axios.post(`/api/filesystem/${projectId}/files`, {
+          fileName: selectedFile.file_name,
+          filePath: parentPath,
+          content: selectedFile.content,
+          autoCommit: true
+        });
+      }
       
       return true; // Return success
     } catch (error) {
@@ -296,6 +335,16 @@ const IDEPage = () => {
         </HeaderLeft>
         
         <HeaderRight>
+          <Button 
+            onClick={() => setActiveTab(activeTab === 'git' ? 'files' : 'git')}
+            style={{ 
+              background: 'linear-gradient(135deg, #007acc, #005a9e)',
+              marginRight: '0.5rem'
+            }}
+          >
+            <FiGitBranch size={14} />
+            Git
+          </Button>
           <Button onClick={handleSave} disabled={!selectedFile || saving}>
             <FiSave size={14} />
             {saving ? '保存中...' : '保存'}
@@ -305,14 +354,37 @@ const IDEPage = () => {
 
       <MainContent>
         <LeftPanel>
-          <PanelHeader>エクスプローラー</PanelHeader>
-          <FileTree
-            fileTree={fileTree}
-            selectedFile={selectedFile}
-            onFileSelect={handleFileSelect}
-            projectId={projectId}
-            onTreeUpdate={fetchFileTree}
-          />
+          <TabBar>
+            <Tab 
+              $active={activeTab === 'files'}
+              onClick={() => setActiveTab('files')}
+            >
+              <FiFolder size={16} />
+              <span style={{ marginLeft: '0.5rem' }}>ファイル</span>
+            </Tab>
+            <Tab 
+              $active={activeTab === 'git'}
+              onClick={() => setActiveTab('git')}
+            >
+              <FiGitBranch size={16} />
+              <span style={{ marginLeft: '0.5rem' }}>Git</span>
+            </Tab>
+          </TabBar>
+          
+          {activeTab === 'files' ? (
+            <FileTree
+              fileTree={fileTree}
+              selectedFile={selectedFile}
+              onFileSelect={handleFileSelect}
+              projectId={projectId}
+              onTreeUpdate={fetchFileTree}
+            />
+          ) : (
+            <GitPanel
+              projectId={projectId}
+              onRefresh={fetchFileTree}
+            />
+          )}
         </LeftPanel>
 
         <CenterPanel>
@@ -332,7 +404,7 @@ const IDEPage = () => {
           <TerminalContainer>
             <PanelHeader>ターミナル</PanelHeader>
             <div style={{ flex: 1, overflow: 'hidden' }}>
-              <Terminal projectId={projectId} />
+              <ClaudeCodeTerminal projectId={projectId} />
             </div>
           </TerminalContainer>
           
@@ -347,6 +419,7 @@ const IDEPage = () => {
           </BrowserContainer>
         </RightPanel>
       </MainContent>
+      
     </IDEContainer>
   );
 };

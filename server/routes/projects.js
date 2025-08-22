@@ -3,7 +3,7 @@ const { verifyToken } = require('../middleware/auth');
 const db = require('../database/connection');
 const fs = require('fs').promises;
 const path = require('path');
-
+const { v4: uuidv4 } = require('uuid');
 const router = express.Router();
 
 // Get user projects
@@ -23,14 +23,15 @@ router.get('/', verifyToken, async (req, res) => {
 router.post('/', verifyToken, async (req, res) => {
   try {
     const { name, description } = req.body;
+    const projectId = uuidv4();
     
     const [result] = await db.execute(
-      'INSERT INTO projects (user_id, name, description) VALUES (?, ?, ?)',
-      [req.user.id, name, description || '']
+      'INSERT INTO projects (id, user_id, name, description) VALUES (?, ?, ?, ?)',
+      [projectId, req.user.id, name, description || '']
     );
 
-    // Create project directory
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), result.insertId.toString());
+    // Create project directory structure
+    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
     await fs.mkdir(projectPath, { recursive: true });
 
     // Create initial files
@@ -63,29 +64,141 @@ h1 {
     const indexJs = `// Your JavaScript code here
 console.log('Welcome to ${name}!');`;
 
-    await fs.writeFile(path.join(projectPath, 'index.html'), indexHtml);
-    await fs.writeFile(path.join(projectPath, 'style.css'), indexCss);
-    await fs.writeFile(path.join(projectPath, 'script.js'), indexJs);
-
-    // Save files to database
-    const files = [
-      { path: 'index.html', content: indexHtml, type: 'html' },
-      { path: 'style.css', content: indexCss, type: 'css' },
-      { path: 'script.js', content: indexJs, type: 'javascript' }
-    ];
-
-    for (const file of files) {
-      await db.execute(
-        'INSERT INTO project_files (project_id, file_path, file_name, content, file_type) VALUES (?, ?, ?, ?, ?)',
-        [result.insertId, file.path, path.basename(file.path), file.content, file.type]
-      );
+    // Write files to disk
+    try {
+      console.log('Project path:', projectPath);
+      
+      // Ensure project directory exists
+      await fs.mkdir(projectPath, { recursive: true });
+      console.log('Project directory created/verified');
+      
+      // Create initial files
+      await fs.writeFile(path.join(projectPath, 'index.html'), indexHtml);
+      console.log('Created index.html');
+      
+      await fs.writeFile(path.join(projectPath, 'style.css'), indexCss);
+      console.log('Created style.css');
+      
+      await fs.writeFile(path.join(projectPath, 'script.js'), indexJs);
+      console.log('Created script.js');
+      
+      console.log('All files created successfully');
+      
+    } catch (fileError) {
+      console.error('Error creating files:', fileError);
+      console.error('Error details:', {
+        code: fileError.code,
+        errno: fileError.errno,
+        syscall: fileError.syscall,
+        path: fileError.path
+      });
+      throw new Error(`Failed to create project files: ${fileError.message}`);
     }
 
-    const [newProject] = await db.execute('SELECT * FROM projects WHERE id = ?', [result.insertId]);
+    // Initialize filesystem records for created files
+    const crypto = require('crypto');
+    const calculateChecksum = (content) => crypto.createHash('sha256').update(content).digest('hex');
+    
+    const initialFiles = [
+      { name: 'index.html', content: indexHtml, type: 'html' },
+      { name: 'style.css', content: indexCss, type: 'css' },
+      { name: 'script.js', content: indexJs, type: 'javascript' }
+    ];
+
+    try {
+      // Clean up existing files for this project first (in case of retry)
+      // file_versions will be deleted automatically due to CASCADE constraint
+      await db.execute('DELETE FROM project_files WHERE project_id = ?', [projectId]);
+      console.log('Cleaned up existing project files from database');
+
+      for (const file of initialFiles) {
+        // Try new database structure first, fallback to old structure
+        try {
+          const checksum = calculateChecksum(file.content);
+          const fileSize = Buffer.byteLength(file.content, 'utf8');
+          
+          // Try new filesystem database structure
+          const [result] = await db.execute(`
+            INSERT INTO project_files 
+            (project_id, file_path, file_name, content, file_type, file_size, 
+             permissions, checksum, is_binary, created_by, updated_by) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [projectId, file.name, file.name, file.content, file.type, fileSize, 
+             'rw-r--r--', checksum, false, req.user.id, req.user.id]
+          );
+
+          const fileId = result.insertId;
+          
+          // Create initial version record
+          await db.execute(`
+            INSERT INTO file_versions 
+            (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
+            VALUES (?, 1, ?, ?, 'create', 'Initial file creation', ?)`,
+            [fileId, fileSize, checksum, req.user.id]
+          );
+          
+          console.log(`Saved ${file.name} to database with new structure`);
+        } catch (newStructureError) {
+          console.log(`New structure failed for ${file.name}, trying legacy structure:`, newStructureError.message);
+          
+          // Fallback to old database structure
+          await db.execute(
+            'INSERT INTO project_files (project_id, file_path, file_name, content, file_type) VALUES (?, ?, ?, ?, ?)',
+            [projectId, file.name, file.name, file.content, file.type]
+          );
+          
+          console.log(`Saved ${file.name} to database with legacy structure`);
+        }
+      }
+    } catch (dbError) {
+      console.error('Error saving files to database:', dbError);
+      // Don't fail project creation if database save fails - files exist on disk
+      console.warn('Files created on disk but database save failed - will be synced on first access');
+    }
+
+    const [newProject] = await db.execute('SELECT * FROM projects WHERE id = ?', [projectId]);
+    
+    if (newProject.length === 0) {
+      console.error('Project was created but could not be retrieved from database');
+      return res.status(500).json({ message: 'Project created but could not be retrieved' });
+    }
+    
+    // Git初期化をプロジェクト作成時に実行
+    try {
+      const GitManager = require('../utils/gitManager');
+      const gitManager = new GitManager(projectPath);
+      
+      console.log('Initializing Git repository for new project...');
+      await gitManager.initRepository(req.user.name, req.user.email);
+      
+      // データベースの git_repositories レコードを作成/更新
+      await db.execute(`
+        INSERT INTO git_repositories (project_id, is_initialized, git_user_name, git_user_email, current_branch)
+        VALUES (?, TRUE, ?, ?, 'main')
+        ON DUPLICATE KEY UPDATE 
+        is_initialized = TRUE, 
+        git_user_name = VALUES(git_user_name),
+        git_user_email = VALUES(git_user_email),
+        current_branch = 'main'`,
+        [projectId, req.user.name, req.user.email]
+      );
+      
+      console.log('Git repository initialized successfully for project:', projectId);
+    } catch (gitError) {
+      console.error('Git initialization failed during project creation:', gitError);
+      // Git初期化が失敗してもプロジェクト作成は成功とする
+    }
+    
+    console.log('Project creation completed successfully:', newProject[0]);
     res.status(201).json(newProject[0]);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Error creating project' });
+    console.error('Error in project creation:', error);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      message: 'Error creating project',
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -101,7 +214,11 @@ router.get('/:id', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found' });
     }
 
-    res.json(projects[0]);
+    const project = projects[0];
+    
+    // Git初期化は別途Git APIで実行するため、ここでは処理しない
+
+    res.json(project);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching project' });
   }
@@ -131,23 +248,50 @@ router.put('/:id', verifyToken, async (req, res) => {
 // Delete project
 router.delete('/:id', verifyToken, async (req, res) => {
   try {
-    // Delete project directory
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), req.params.id);
-    try {
-      await fs.rmdir(projectPath, { recursive: true });
-    } catch (error) {
-      // Directory might not exist, continue
-    }
-
-    // Delete from database (cascade will handle files)
-    await db.execute(
-      'DELETE FROM projects WHERE id = ? AND user_id = ?',
-      [req.params.id, req.user.id]
+    const projectId = req.params.id;
+    
+    // Verify project ownership
+    const [projects] = await db.execute(
+      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
+      [projectId, req.user.id]
     );
 
-    res.json({ message: 'Project deleted successfully' });
+    if (projects.length === 0) {
+      return res.status(404).json({ message: 'Project not found or access denied' });
+    }
+
+    // Delete project directory
+    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    try {
+      await fs.rm(projectPath, { recursive: true, force: true });
+      console.log(`Deleted project directory: ${projectPath}`);
+    } catch (error) {
+      console.warn(`Could not delete project directory: ${error.message}`);
+      // Continue with database deletion even if file deletion fails
+    }
+
+    // Delete from database (CASCADE will handle related records)
+    const [deleteResult] = await db.execute(
+      'DELETE FROM projects WHERE id = ? AND user_id = ?',
+      [projectId, req.user.id]
+    );
+
+    if (deleteResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Project not found' });
+    }
+
+    console.log(`Project ${projectId} deleted successfully by user ${req.user.id}`);
+    res.json({ 
+      message: 'Project deleted successfully',
+      projectId: projectId,
+      projectName: projects[0].name
+    });
   } catch (error) {
-    res.status(500).json({ message: 'Error deleting project' });
+    console.error('Error deleting project:', error);
+    res.status(500).json({ 
+      message: 'Error deleting project',
+      error: error.message 
+    });
   }
 });
 

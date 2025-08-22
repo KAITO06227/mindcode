@@ -4,7 +4,9 @@
       "Bash(mkdir:*)",
       "Bash(npm run install:all:*)",
       "Bash(npm run server:dev:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(git log:*)",
+      "Bash(rm:*)"
     ],
     "deny": []
   }

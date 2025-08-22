@@ -25,17 +25,19 @@ const db = require('./database/connection');
 // Routes
 const authRoutes = require('./routes/auth');
 const projectRoutes = require('./routes/projects');
-const fileRoutes = require('./routes/files');
+const fileRoutes = require('./routes/files'); // Legacy - will be phased out
 const claudeRoutes = require('./routes/claude');
 const adminRoutes = require('./routes/admin');
-const gitRoutes = require('./routes/git');
+const fileSystemRoutes = require('./routes/fileSystem');
+const versionControlRoutes = require('./routes/versionControl');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
-app.use('/api/files', fileRoutes);
+app.use('/api/files', fileRoutes); // Legacy support
 app.use('/api/claude', claudeRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/git', gitRoutes);
+app.use('/api/filesystem', fileSystemRoutes); // New filesystem API
+app.use('/api/version-control', versionControlRoutes); // New Git API
 
 // Serve React app for all other routes (only in production)
 if (process.env.NODE_ENV === 'production') {

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
 import {
@@ -117,24 +117,13 @@ const ErrorTitle = styled.h3`
 const SmallBrowser = ({ projectId }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [history, setHistory] = useState(['']);
+  const [navigationHistory, setNavigationHistory] = useState(['']);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [htmlContent, setHtmlContent] = useState('');
-  const [currentUrl, setCurrentUrl] = useState(''); // Track current preview URL like kenya.html
+  const [currentUrl, setCurrentUrl] = useState('');
   const iframeRef = useRef(null);
 
-  useEffect(() => {
-    loadProject();
-  }, [projectId]);
-
-  // Update iframe when htmlContent changes
-  useEffect(() => {
-    if (htmlContent) {
-      updateIframe(htmlContent);
-    }
-  }, [htmlContent]);
-
-  const loadProject = async () => {
+  const loadProject = useCallback(async () => {
     if (!projectId) return;
     
     console.log('SmallBrowser: loadProject called for projectId:', projectId);
@@ -176,10 +165,10 @@ const SmallBrowser = ({ projectId }) => {
               `<link rel="stylesheet" href="./${fileName}" />`
             ];
             
-            exactPatterns.forEach(pattern => {
-              htmlContent = htmlContent.replace(new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), 
-                `<style>\n${cssContent}\n</style>`);
-            });
+            for (const pattern of exactPatterns) {
+              const regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+              htmlContent = htmlContent.replace(regex, `<style>\n${cssContent}\n</style>`);
+            }
             
             console.log(`Embedded CSS file: ${fileName}`);
           } catch (error) {
@@ -204,10 +193,10 @@ const SmallBrowser = ({ projectId }) => {
               `<script type="text/javascript" src="./${fileName}"></script>`
             ];
             
-            exactPatterns.forEach(pattern => {
-              htmlContent = htmlContent.replace(new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), 
-                `<script>\n${jsContent}\n</script>`);
-            });
+            for (const pattern of exactPatterns) {
+              const regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+              htmlContent = htmlContent.replace(regex, `<script>\n${jsContent}\n</script>`);
+            }
             
             console.log(`Embedded JS file: ${fileName}`);
           } catch (error) {
@@ -239,7 +228,18 @@ const SmallBrowser = ({ projectId }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId]);
+
+  useEffect(() => {
+    loadProject();
+  }, [loadProject]);
+
+  // Update iframe when htmlContent changes
+  useEffect(() => {
+    if (htmlContent) {
+      updateIframe(htmlContent);
+    }
+  }, [htmlContent]);
 
   const findFile = (tree, fileName) => {
     for (const key in tree) {
@@ -309,7 +309,7 @@ const SmallBrowser = ({ projectId }) => {
   };
 
   const handleForward = () => {
-    if (currentIndex < history.length - 1) {
+    if (currentIndex < navigationHistory.length - 1) {
       setCurrentIndex(currentIndex + 1);
       // In a real implementation, this would navigate forward
     }
@@ -371,7 +371,7 @@ const SmallBrowser = ({ projectId }) => {
         
         <ToolbarButton
           onClick={handleForward}
-          disabled={currentIndex >= history.length - 1}
+          disabled={currentIndex >= navigationHistory.length - 1}
           title="Forward"
         >
           <FiArrowRight size={14} />

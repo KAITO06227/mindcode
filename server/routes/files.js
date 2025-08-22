@@ -221,19 +221,24 @@ router.patch('/:projectId/:fileId/rename', verifyToken, async (req, res) => {
 router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req, res) => {
   try {
     const uploadedFiles = [];
+    const targetPath = req.body.targetPath || ''; // Get target path from form data
 
     for (const file of req.files) {
       const content = await fs.readFile(file.path, 'utf-8').catch(() => ''); // Binary files will be empty string
       
+      // Construct full file path
+      const fullFilePath = targetPath ? `${targetPath}/${file.filename}` : file.filename;
+      
       const [result] = await db.execute(
         'INSERT INTO project_files (project_id, file_path, file_name, content, file_type) VALUES (?, ?, ?, ?, ?)',
-        [req.params.projectId, file.filename, file.filename, content, getFileType(file.filename)]
+        [req.params.projectId, fullFilePath, file.filename, content, getFileType(file.filename)]
       );
 
       uploadedFiles.push({
         id: result.insertId,
         filename: file.filename,
-        size: file.size
+        size: file.size,
+        path: fullFilePath
       });
     }
 
@@ -253,15 +258,24 @@ function buildFileTree(files) {
     
     parts.forEach((part, index) => {
       if (!current[part]) {
+        // Check if this is the final part and matches the actual file/folder record
+        const isLastPart = index === parts.length - 1;
+        const matchesFileName = file.file_name === part;
+        const isActualFile = isLastPart && matchesFileName && file.content !== '';
+        const isActualFolder = isLastPart && matchesFileName && file.content === '';
+        
         current[part] = {
           name: part,
-          type: index === parts.length - 1 ? 'file' : 'folder',
+          type: isActualFile ? 'file' : 'folder',
           path: parts.slice(0, index + 1).join('/'),
           children: {},
-          ...(index === parts.length - 1 && { 
+          ...(isActualFile && { 
             id: file.id,
             content: file.content,
             fileType: file.file_type 
+          }),
+          ...(isActualFolder && {
+            id: file.id
           })
         };
       }

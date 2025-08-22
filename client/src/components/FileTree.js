@@ -1,14 +1,14 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
 import {
   FiFile,
   FiFolder,
-  FiPlus,
+  FiFolderMinus,
   FiEdit2,
   FiTrash2,
   FiUpload,
-  FiMoreVertical
+  FiFolderPlus
 } from 'react-icons/fi';
 
 const TreeContainer = styled.div`
@@ -52,53 +52,6 @@ const ItemName = styled.span`
   font-size: 0.875rem;
 `;
 
-const ActionsButton = styled.button`
-  background: none;
-  border: none;
-  color: #888888;
-  cursor: pointer;
-  padding: 0.25rem;
-  border-radius: 4px;
-  opacity: 0;
-  transition: opacity 0.2s;
-
-  ${TreeItem}:hover & {
-    opacity: 1;
-  }
-
-  &:hover {
-    background-color: #404040;
-    color: #ffffff;
-  }
-`;
-
-const ContextMenu = styled.div`
-  position: absolute;
-  top: ${props => props.y}px;
-  left: ${props => props.x}px;
-  background-color: #2d2d2d;
-  border: 1px solid #404040;
-  border-radius: 4px;
-  padding: 0.25rem 0;
-  z-index: 1000;
-  min-width: 150px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-`;
-
-const ContextMenuItem = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  cursor: pointer;
-  font-size: 0.875rem;
-  color: #cccccc;
-
-  &:hover {
-    background-color: #404040;
-    color: #ffffff;
-  }
-`;
 
 const ToolbarContainer = styled.div`
   display: flex;
@@ -116,9 +69,15 @@ const ToolbarButton = styled.button`
   padding: 0.25rem;
   border-radius: 4px;
 
-  &:hover {
+  &:hover:not(:disabled) {
     background-color: #404040;
     color: #ffffff;
+  }
+
+  &:disabled {
+    color: #666666;
+    cursor: not-allowed;
+    opacity: 0.5;
   }
 `;
 
@@ -139,13 +98,32 @@ const Input = styled.input`
 
 const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdate }) => {
   const [expandedFolders, setExpandedFolders] = useState(new Set(['']));
-  const [contextMenu, setContextMenu] = useState(null);
   const [editingItem, setEditingItem] = useState(null);
   const [newItemName, setNewItemName] = useState('');
+  const [selectedItem, setSelectedItem] = useState(null);
   const fileInputRef = useRef(null);
+
+  // Set up global file tree refresh function
+  useEffect(() => {
+    window.refreshFileTree = () => {
+      if (onTreeUpdate) {
+        onTreeUpdate();
+      }
+    };
+
+    // Cleanup on unmount
+    return () => {
+      if (window.refreshFileTree) {
+        delete window.refreshFileTree;
+      }
+    };
+  }, [onTreeUpdate]);
 
   const handleItemClick = (item, event) => {
     event.stopPropagation();
+    
+    // Always update selected item for toolbar operations
+    setSelectedItem(item);
     
     if (item.type === 'folder') {
       const newExpanded = new Set(expandedFolders);
@@ -156,69 +134,86 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       }
       setExpandedFolders(newExpanded);
     } else {
+      // For files, also update the file editor selection
       onFileSelect(item);
     }
   };
 
-  const handleRightClick = (item, event) => {
-    event.preventDefault();
-    event.stopPropagation();
+  // Get target path for operations based on selected item
+  const getTargetPath = () => {
+    if (!selectedItem) return '';
     
-    setContextMenu({
-      item,
-      x: event.clientX,
-      y: event.clientY
-    });
+    if (selectedItem.type === 'folder') {
+      return selectedItem.path;
+    } else {
+      // For files, get the parent directory
+      const pathParts = selectedItem.path.split('/');
+      pathParts.pop(); // Remove the file name
+      return pathParts.join('/');
+    }
   };
 
-  const closeContextMenu = () => {
-    setContextMenu(null);
-  };
-
-  const handleCreateFile = async (parentPath = '') => {
+  const handleCreateFile = async () => {
     try {
       const fileName = prompt('ファイル名を入力してください:');
       if (!fileName) return;
 
-      await axios.post(`/api/files/${projectId}`, {
+      const targetPath = getTargetPath();
+
+      await axios.post(`/api/filesystem/${projectId}/files`, {
         fileName,
-        filePath: parentPath,
+        filePath: targetPath,
         content: '',
         fileType: getFileType(fileName)
       });
 
       onTreeUpdate();
+      
+      // Expand the target folder if it's a folder
+      if (selectedItem?.type === 'folder') {
+        setExpandedFolders(prev => new Set([...prev, selectedItem.path]));
+      }
     } catch (error) {
       console.error('Error creating file:', error);
       alert('ファイルの作成に失敗しました');
     }
-    closeContextMenu();
   };
 
-  const handleCreateFolder = async (parentPath = '') => {
+  const handleCreateFolder = async () => {
     try {
       const folderName = prompt('フォルダ名を入力してください:');
       if (!folderName) return;
 
-      await axios.post(`/api/files/${projectId}`, {
+      const targetPath = getTargetPath();
+
+      await axios.post(`/api/filesystem/${projectId}/files`, {
         fileName: folderName,
-        filePath: parentPath,
+        filePath: targetPath,
         isFolder: true
       });
 
       onTreeUpdate();
-      setExpandedFolders(prev => new Set([...prev, parentPath ? `${parentPath}/${folderName}` : folderName]));
+      
+      const newFolderPath = targetPath ? `${targetPath}/${folderName}` : folderName;
+      setExpandedFolders(prev => new Set([...prev, newFolderPath]));
+      
+      // Expand the parent folder if it's a folder
+      if (selectedItem?.type === 'folder') {
+        setExpandedFolders(prev => new Set([...prev, selectedItem.path]));
+      }
     } catch (error) {
       console.error('Error creating folder:', error);
       alert('フォルダの作成に失敗しました');
     }
-    closeContextMenu();
   };
 
-  const handleRename = (item) => {
-    setEditingItem(item);
-    setNewItemName(item.name);
-    closeContextMenu();
+  const handleRename = () => {
+    if (!selectedItem) {
+      alert('名前を変更するファイル/フォルダを選択してください');
+      return;
+    }
+    setEditingItem(selectedItem);
+    setNewItemName(selectedItem.name);
   };
 
   const handleRenameSubmit = async () => {
@@ -228,7 +223,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
     }
 
     try {
-      await axios.patch(`/api/files/${projectId}/${editingItem.id}/rename`, {
+      await axios.patch(`/api/filesystem/${projectId}/files/${editingItem.id}/rename`, {
         newName: newItemName.trim()
       });
 
@@ -242,19 +237,33 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
     setNewItemName('');
   };
 
-  const handleDelete = async (item) => {
-    if (!window.confirm(`${item.name}を削除しますか？`)) {
+  const handleDelete = async () => {
+    if (!selectedItem || !selectedItem.id) {
+      alert('削除するファイル/フォルダを選択してください');
+      return;
+    }
+
+    const confirmMessage = selectedItem.type === 'folder' 
+      ? `フォルダ "${selectedItem.name}" とその中身をすべて削除しますか？この操作は元に戻せません。`
+      : `ファイル "${selectedItem.name}" を削除しますか？`;
+      
+    if (!window.confirm(confirmMessage)) {
       return;
     }
 
     try {
-      await axios.delete(`/api/files/${projectId}/${item.id}`);
+      const response = await axios.delete(`/api/filesystem/${projectId}/files/${selectedItem.id}`);
       onTreeUpdate();
+      setSelectedItem(null); // Clear selection after delete
+      
+      // Show success message with deletion count for folders
+      if (response.data.deletedCount > 1) {
+        alert(`フォルダと${response.data.deletedCount}個のアイテムを削除しました`);
+      }
     } catch (error) {
       console.error('Error deleting item:', error);
       alert('アイテムの削除に失敗しました');
     }
-    closeContextMenu();
   };
 
   const handleFileUpload = (event) => {
@@ -264,18 +273,28 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
 
   const uploadFiles = async (files) => {
     try {
+      const targetPath = getTargetPath();
+      
       const formData = new FormData();
       files.forEach(file => {
         formData.append('files', file);
       });
+      
+      // Add target path to form data
+      formData.append('targetPath', targetPath);
 
-      await axios.post(`/api/files/${projectId}/upload`, formData, {
+      await axios.post(`/api/filesystem/${projectId}/upload`, formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         }
       });
 
       onTreeUpdate();
+      
+      // Expand the target folder if it's a folder
+      if (selectedItem?.type === 'folder') {
+        setExpandedFolders(prev => new Set([...prev, selectedItem.path]));
+      }
     } catch (error) {
       console.error('Error uploading files:', error);
       alert('ファイルのアップロードに失敗しました');
@@ -298,7 +317,8 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
   const renderTreeItem = (item, depth = 0, parentPath = '') => {
     const currentPath = parentPath ? `${parentPath}/${item.name}` : item.name;
     const isExpanded = expandedFolders.has(currentPath);
-    const isSelected = selectedFile && selectedFile.id === item.id;
+    // Only use selectedItem for highlighting (toolbar selection)
+    const isSelected = selectedItem && selectedItem.id === item.id;
 
     return (
       <div key={currentPath}>
@@ -306,11 +326,10 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
           $depth={depth}
           $selected={isSelected}
           onClick={(e) => handleItemClick({ ...item, path: currentPath }, e)}
-          onContextMenu={(e) => handleRightClick({ ...item, path: currentPath }, e)}
         >
           <ItemIcon $type={item.type} $isOpen={isExpanded}>
             {item.type === 'folder' ? (
-              <FiFolder size={16} />
+              isExpanded ? <FiFolderMinus size={16} /> : <FiFolder size={16} />
             ) : (
               <FiFile size={16} />
             )}
@@ -330,10 +349,6 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
           ) : (
             <ItemName>{item.name}</ItemName>
           )}
-          
-          <ActionsButton onClick={(e) => handleRightClick({ ...item, path: currentPath }, e)}>
-            <FiMoreVertical size={14} />
-          </ActionsButton>
         </TreeItem>
 
         {item.type === 'folder' && isExpanded && item.children && (
@@ -348,56 +363,28 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
   return (
     <>
       <ToolbarContainer>
-        <div>
-          <ToolbarButton onClick={() => handleCreateFile()}>
-            <FiPlus size={16} />
+        <div style={{ display: 'flex', gap: '0.25rem' }}>
+          <ToolbarButton onClick={handleCreateFile} title="新規ファイル">
+            <FiFile size={16} />
           </ToolbarButton>
-          <ToolbarButton onClick={() => handleCreateFolder()}>
-            <FiFolder size={16} />
+          <ToolbarButton onClick={handleCreateFolder} title="新規フォルダ">
+            <FiFolderPlus size={16} />
           </ToolbarButton>
-          <ToolbarButton onClick={() => fileInputRef.current?.click()}>
+          <ToolbarButton onClick={() => fileInputRef.current?.click()} title="ファイルアップロード">
             <FiUpload size={16} />
+          </ToolbarButton>
+          <ToolbarButton onClick={handleRename} disabled={!selectedItem} title="名前変更">
+            <FiEdit2 size={16} />
+          </ToolbarButton>
+          <ToolbarButton onClick={handleDelete} disabled={!selectedItem || !selectedItem.id} title="削除">
+            <FiTrash2 size={16} />
           </ToolbarButton>
         </div>
       </ToolbarContainer>
 
-      <TreeContainer onClick={closeContextMenu}>
+      <TreeContainer>
         {Object.values(fileTree).map(item => renderTreeItem(item))}
       </TreeContainer>
-
-      {contextMenu && (
-        <>
-          <div
-            style={{
-              position: 'fixed',
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              zIndex: 999
-            }}
-            onClick={closeContextMenu}
-          />
-          <ContextMenu x={contextMenu.x} y={contextMenu.y}>
-            <ContextMenuItem onClick={() => handleCreateFile(contextMenu.item.path)}>
-              <FiFile size={14} />
-              新しいファイル
-            </ContextMenuItem>
-            <ContextMenuItem onClick={() => handleCreateFolder(contextMenu.item.path)}>
-              <FiFolder size={14} />
-              新しいフォルダ
-            </ContextMenuItem>
-            <ContextMenuItem onClick={() => handleRename(contextMenu.item)}>
-              <FiEdit2 size={14} />
-              名前を変更
-            </ContextMenuItem>
-            <ContextMenuItem onClick={() => handleDelete(contextMenu.item)}>
-              <FiTrash2 size={14} />
-              削除
-            </ContextMenuItem>
-          </ContextMenu>
-        </>
-      )}
 
       <input
         ref={fileInputRef}

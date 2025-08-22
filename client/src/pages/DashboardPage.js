@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
 import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
-import { FiPlus, FiFolder, FiSettings, FiLogOut, FiGithub } from 'react-icons/fi';
+import { FiPlus, FiFolder, FiSettings, FiLogOut, FiGithub, FiTrash2 } from 'react-icons/fi';
 import CreateProjectModal from '../components/CreateProjectModal';
 
 const DashboardContainer = styled.div`
@@ -113,10 +113,50 @@ const ProjectCard = styled.div`
   padding: 1.5rem;
   cursor: pointer;
   transition: all 0.2s;
+  position: relative;
 
   &:hover {
     border-color: #007acc;
     transform: translateY(-2px);
+  }
+`;
+
+const ProjectActions = styled.div`
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  display: none;
+  background-color: #404040;
+  border-radius: 4px;
+  border: 1px solid #555;
+  
+  ${ProjectCard}:hover & {
+    display: block;
+  }
+`;
+
+const ActionButton = styled.button`
+  background: none;
+  border: none;
+  color: #cccccc;
+  padding: 0.5rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  border-radius: 4px;
+  width: 100%;
+  text-align: left;
+
+  &:hover {
+    background-color: #555;
+    color: #ffffff;
+  }
+
+  &.danger:hover {
+    background-color: #dc3545;
+    color: #ffffff;
   }
 `;
 
@@ -185,6 +225,25 @@ const DashboardPage = () => {
       setShowCreateModal(false);
     } catch (error) {
       console.error('Error creating project:', error);
+    }
+  };
+
+  const handleDeleteProject = async (projectId, projectName, event) => {
+    event.stopPropagation(); // Prevent card click
+    
+    const confirmMessage = `本当にプロジェクト「${projectName}」を削除しますか？\n\n⚠️ この操作は取り消すことができません。\n・すべてのファイルが削除されます\n・Git履歴も削除されます\n・関連するデータもすべて削除されます`;
+    
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      await axios.delete(`/api/projects/${projectId}`);
+      setProjects(prev => prev.filter(p => p.id !== projectId));
+      alert(`プロジェクト「${projectName}」を削除しました。`);
+    } catch (error) {
+      console.error('Error deleting project:', error);
+      alert('プロジェクトの削除に失敗しました: ' + (error.response?.data?.message || error.message));
     }
   };
 
@@ -269,6 +328,17 @@ const DashboardPage = () => {
                   key={project.id}
                   onClick={() => handleProjectClick(project.id)}
                 >
+                  <ProjectActions>
+                    <ActionButton 
+                      className="danger"
+                      onClick={(e) => handleDeleteProject(project.id, project.name, e)}
+                      title="プロジェクトを削除"
+                    >
+                      <FiTrash2 size={14} />
+                      削除
+                    </ActionButton>
+                  </ProjectActions>
+                  
                   <ProjectTitle>{project.name}</ProjectTitle>
                   <ProjectDescription>
                     {project.description || '説明がありません'}

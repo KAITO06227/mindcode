@@ -1,6 +1,8 @@
 const express = require('express');
 const { verifyToken, isTeacher } = require('../middleware/auth');
 const db = require('../database/connection');
+const fs = require('fs').promises;
+const path = require('path');
 
 const router = express.Router();
 
@@ -123,6 +125,61 @@ router.get('/projects/:projectId/files', verifyToken, isTeacher, async (req, res
     res.json(files);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching project files' });
+  }
+});
+
+// Delete project (teachers only)
+router.delete('/projects/:id', verifyToken, isTeacher, async (req, res) => {
+  try {
+    const projectId = req.params.id;
+    
+    // Get project details including user info
+    const [projects] = await db.execute(`
+      SELECT p.*, u.id as user_id, u.name as user_name 
+      FROM projects p 
+      JOIN users u ON p.user_id = u.id 
+      WHERE p.id = ?
+    `, [projectId]);
+
+    if (projects.length === 0) {
+      return res.status(404).json({ message: 'Project not found' });
+    }
+
+    const project = projects[0];
+
+    // Delete project directory
+    const projectPath = path.join(__dirname, '../../user_projects', project.user_id.toString(), projectId);
+    try {
+      await fs.rm(projectPath, { recursive: true, force: true });
+      console.log(`Admin deleted project directory: ${projectPath}`);
+    } catch (error) {
+      console.warn(`Could not delete project directory: ${error.message}`);
+      // Continue with database deletion even if file deletion fails
+    }
+
+    // Delete from database (CASCADE will handle related records)
+    const [deleteResult] = await db.execute(
+      'DELETE FROM projects WHERE id = ?',
+      [projectId]
+    );
+
+    if (deleteResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Project not found' });
+    }
+
+    console.log(`Admin ${req.user.id} deleted project ${projectId} (${project.name}) owned by user ${project.user_id}`);
+    res.json({ 
+      message: 'Project deleted successfully',
+      projectId: projectId,
+      projectName: project.name,
+      ownerName: project.user_name
+    });
+  } catch (error) {
+    console.error('Error deleting project (admin):', error);
+    res.status(500).json({ 
+      message: 'Error deleting project',
+      error: error.message 
+    });
   }
 });
 

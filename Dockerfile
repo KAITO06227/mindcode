@@ -1,7 +1,10 @@
 FROM node:18-alpine
 
 # Install Python and build tools for node-pty
-RUN apk add --no-cache python3 make g++ git bash
+RUN apk update && apk add --no-cache python3 make g++ bash
+
+# Install latest Git from edge repository
+RUN apk add --no-cache git --repository=http://dl-cdn.alpinelinux.org/alpine/edge/main
 
 # Create app directory
 WORKDIR /app
