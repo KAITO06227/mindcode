@@ -11,6 +11,12 @@
 
 **MindCode**は、青山学院大学の学生と教職員を対象とした教育用Web開発統合開発環境（IDE）です。ブラウザ上で直接コーディング、プレビュー、バージョン管理、AI支援を行うことができます。
 
+### 🏛️ アーキテクチャの特徴
+- **二重ファイルシステム構造**: 物理ファイルシステムとデータベースファイルシステムの統合管理
+- **拡張Git統合**: GitManagerクラスによるバージョン管理とメタデータ同期
+- **Socket.IO ベースAI統合**: WebSocketでのClaude Code連携
+- **ドメイン限定認証**: 青山学院大学専用のセキュアな環境
+
 ### 🎯 対象ユーザー
 - **学生**: Web開発の学習とプロジェクト作成
 - **教師**: 学生のプロジェクト管理と進捗確認
@@ -30,19 +36,44 @@
 - **ファイル管理**: フォルダ構造でのプロジェクト管理
 
 ### 🤖 AI支援
-- **Claude Code統合**: AI助手によるコード生成・デバッグ支援
-- **日本語対応**: すべての対話を日本語で実行
-- **自動Git連携**: AI相談前に自動でコード保存
+- **Claude Code統合**: xterm.jsベースのターミナルでAI助手との対話
+- **日本語完全対応**: すべてのUI・エラーメッセージ・AI対話を日本語で実行
+- **自動Git連携**: プロンプト送信前の自動コミット・プッシュ
+- **Socket.IO アーキテクチャ**: WebSocketによるリアルタイムAI通信
+- **セッション管理**: プロジェクト別Claude プロセス管理
 
 ### 📁 プロジェクト管理
-- **複数プロジェクト対応**: 個人プロジェクトの作成・管理
-- **ファイルアップロード**: 既存ファイルの一括アップロード
-- **Git統合**: バージョン管理とGitHub連携
+- **二重ファイルシステム**: 物理ファイルとデータベースの統合管理
+- **拡張メタデータ**: ファイル権限・チェックサム・バージョン履歴
+- **アクセスログ**: 詳細なファイル操作履歴
+- **ファイルアップロード**: フォルダ構造を維持した一括アップロード
+- **Git統合**: GitManagerによる厳格なバージョン管理
 
 ### 👨‍🏫 教師機能
 - **学生管理**: 全学生アカウントの閲覧・管理
 - **プロジェクト監視**: 学生プロジェクトの進捗確認
 - **ライブプレビュー**: 学生の作成サイトをリアルタイム表示
+
+## 🏗️ システム技術仕様
+
+### フロントエンド
+- **React**: Create React App (ポート3000)
+- **Monaco Editor**: VS Code エンジンベースのコードエディタ
+- **Socket.IO Client**: Claude Code統合のWebSocket通信
+- **Styled Components**: CSS-in-JS スタイリング
+
+### バックエンド  
+- **Node.js + Express**: APIサーバー (ポート3001)
+- **Socket.IO**: WebSocketベースのリアルタイム通信
+- **Passport + Google OAuth 2.0**: 認証システム
+- **JWT**: セキュアなセッション管理
+
+### データベース
+- **MySQL**: メインデータベース (ポート3306)
+- **拡張ファイルシステムスキーマ**: メタデータ・バージョン管理対応
+
+### 開発プロキシ
+- クライアント → `http://localhost:3001` (自動プロキシ設定)
 
 ## 🚀 クイックスタート
 
@@ -50,6 +81,7 @@
 - Node.js 16+ 
 - MySQL 8.0+
 - Google Cloud Console アカウント
+- Claude CLI (オプション: AI機能使用時)
 
 ### インストール
 
@@ -94,7 +126,12 @@ CLIENT_URL=http://localhost:3000
 mysql -u root -p
 CREATE DATABASE mindcode;
 USE mindcode;
+
+# 基本スキーマ
 SOURCE server/database/init.sql;
+
+# 拡張ファイルシステムスキーマ（必須）
+SOURCE server/database/file_system_schema.sql;
 ```
 
 5. **開発サーバーの起動**
@@ -139,40 +176,76 @@ mindcode/
 ├── client/                 # React フロントエンド
 │   ├── src/
 │   │   ├── components/     # UIコンポーネント
+│   │   │   ├── FileTree    # ファイル管理UI
+│   │   │   ├── GitPanel    # Git統合UI
+│   │   │   └── SmallBrowser # HTML/CSS/JSプレビュー
 │   │   ├── pages/         # ページコンポーネント
+│   │   │   ├── IDEPage     # メインIDE画面
+│   │   │   ├── AdminPage   # 教師管理画面
+│   │   │   └── DashboardPage # プロジェクト一覧
 │   │   ├── contexts/      # React Context
-│   │   └── utils/         # ユーティリティ
+│   │   ├── hooks/         # カスタムフック
+│   │   └── utils/         # フロントエンドユーティリティ
 │   └── public/
 ├── server/                 # Node.js バックエンド
 │   ├── routes/            # API ルート
+│   │   ├── auth.js        # Google OAuth認証
+│   │   ├── files.js       # Legacy File API
+│   │   ├── filesystem.js  # Enhanced File API
+│   │   ├── version-control.js # Git統合API
+│   │   ├── claude.js      # Claude Code API
+│   │   └── admin.js       # 管理機能API
 │   ├── middleware/        # 認証ミドルウェア
 │   ├── database/          # DB接続・スキーマ
-│   └── utils/             # サーバーユーティリティ
-├── user_projects/          # ユーザープロジェクト保存
+│   │   ├── init.sql       # 基本スキーマ
+│   │   └── file_system_schema.sql # 拡張スキーマ
+│   ├── utils/             # サーバーユーティリティ
+│   │   ├── gitManager.js  # Git操作管理
+│   │   └── claudeSocket.js # Claude統合Socket.IO
+│   └── models/            # データベースモデル
+├── user_projects/          # 物理ファイルシステム
+│   └── [userId]/          # ユーザー別プロジェクト
+│       └── [projectId]/   # プロジェクト別フォルダ
 ├── docker-compose.yml      # Docker設定
 └── package.json           # プロジェクト設定
 ```
 
 ## 🔧 開発コマンド
 
+**⚠️ 重要: Claude Code使用時の制限**
+- **Claude Codeはサーバー起動コマンドを実行してはいけません**
+- **npm run dev、docker compose upなど、サーバー起動コマンドは一切実行禁止**
+- **ユーザーがサーバーを起動・管理します**
+
+### 利用可能なコマンド
+
 ```bash
-# 開発サーバー起動（フロント+バック同時）
-npm run dev
+# 依存関係のインストール
+npm run install:all          # ルートとclientの両方のnode_modules
 
-# サーバーのみ起動
-npm run server:dev
+# ビルド関連
+npm run build                # クライアントのプロダクションビルド
 
-# クライアントのみ起動  
-npm run client:dev
+# テスト (クライアントのみ)
+cd client && npm test        # Jest テストの実行
 
-# プロダクションビルド
-npm run build
+# データベーススキーマ適用
+mysql -u root -p webide < server/database/init.sql
+mysql -u root -p webide < server/database/file_system_schema.sql
 
-# プロダクション起動
-npm start
+# Docker環境でのデータベース初期化
+docker-compose exec db mysql -u root -ppassword webide < /docker-entrypoint-initdb.d/init.sql
 
-# 全依存関係インストール
-npm run install:all
+# ユーティリティスクリプト
+./apply_db_schema.sh         # データベーススキーマ適用スクリプト
+./setup_file_system.sh       # ファイルシステム設定スクリプト
+./reset-environment.sh       # 環境リセットスクリプト
+```
+
+### 🚫 Claude Code実行禁止コマンド
+```bash
+# これらのコマンドは実行してはいけません
+# npm run dev, docker compose up, npm run server:dev, npm run client:dev, npm start
 ```
 
 ## 🐳 Docker環境
@@ -198,13 +271,79 @@ docker-compose down
 
 ## 📊 データベース構造
 
-### 主要テーブル
+### 拡張ファイルシステムスキーマ（必須）
+```sql
+-- 拡張project_filesテーブル（メタデータ・バージョン管理）
+project_files: id, project_id, file_path, file_name, content, file_type, 
+               file_size, permissions, checksum, is_binary, created_by, updated_by
 
-- **users**: ユーザー情報（Google OAuth）
-- **projects**: プロジェクトメタデータ
-- **project_files**: ファイル内容と構造
-- **claude_sessions**: AI対話履歴
-- **git_commits**: バージョン管理履歴
+-- ファイルバージョン履歴
+file_versions: id, file_id, version_number, git_commit_hash, content_diff,
+               file_size, checksum, change_type, change_summary, created_by
+
+-- ファイルアクセスログ
+file_access_logs: id, file_id, user_id, access_type, ip_address, user_agent
+
+-- Git リポジトリ情報
+git_repositories: id, project_id, is_initialized, current_branch, last_commit_hash,
+                  remote_url, git_user_name, git_user_email
+```
+
+### コアテーブル
+```sql
+users: id, google_id, email, name, role, avatar_url
+projects: id, user_id, name, description, git_url  
+claude_sessions: id, user_id, project_id, session_data
+```
+
+### 二重ファイルシステム構造
+このプロジェクトは独特の二重ファイルシステムを採用：
+
+1. **物理ファイルシステム** (`user_projects/[userId]/[projectId]/`)
+   - 実際のファイルが保存される場所
+   - Git操作の対象
+   - Monaco Editorが直接読み込む
+
+2. **データベースファイルシステム** (拡張project_files テーブル)
+   - ファイルメタデータ（権限、チェックサム、バージョン）
+   - アクセスログとバージョン履歴
+   - 検索とインデックス機能
+
+## 🤝 トラブルシューティング
+
+## 🔌 API エンドポイント
+
+### 認証 (/api/auth)
+- GET /google - Google OAuth開始
+- GET /google/callback - OAuth コールバック
+- GET /me - 現在のユーザー情報取得
+- POST /logout - ログアウト
+
+### プロジェクト (/api/projects)
+- GET / - プロジェクト一覧取得
+- POST / - プロジェクト作成
+- GET /:id - プロジェクト詳細取得
+- PUT /:id - プロジェクト更新
+- DELETE /:id - プロジェクト削除
+
+### ファイル操作
+**Legacy API** (`/api/files`): 従来のシンプルなファイル操作
+**Enhanced API** (`/api/filesystem`): メタデータ・バージョン管理対応
+
+### Version Control (/api/version-control)
+- POST /:projectId/init - Git初期化
+- GET /:projectId/status - Git状況取得
+- POST /:projectId/commit - コミット作成
+- GET /:projectId/history - コミット履歴取得
+
+### Claude Code (/api/claude)
+- POST /execute/:projectId - Claude Codeコマンド実行
+- POST /session/:projectId - インタラクティブセッション開始
+
+### 管理 (/api/admin)
+- GET /users - ユーザー一覧取得
+- PATCH /users/:id/role - ユーザー役割更新
+- GET /projects - 全プロジェクト取得
 
 ## 🤝 トラブルシューティング
 
@@ -212,36 +351,65 @@ docker-compose down
 
 1. **ログインできない**
    - Google Cloud Consoleの設定を確認
-   - 大学メールアドレスでアクセスしているか確認
-   - テストユーザーに追加されているか確認
+   - 大学メールアドレス（@gsuite.si.aoyama.ac.jp）でアクセス
+   - OAuth同意画面でテストユーザーに追加されているか確認
 
 2. **データベース接続エラー**
    - MySQLサービスが起動しているか確認
-   - `.env`の設定が正しいか確認
-   - データベースとテーブルが作成されているか確認
+   - 拡張ファイルシステムスキーマが適用されているか確認
+   - Docker環境の場合、コンテナが正常に起動しているか確認
 
-3. **ポート競合エラー**
-   - 3000番・3001番ポートが使用中でないか確認
-   - 他のアプリケーションを停止
+3. **Claude Code統合エラー**
+   - Claude CLI がインストールされているか確認（ENOENT エラー）
+   - プロジェクトディレクトリでClaude プロセスが起動できるか確認
+   - Socket.IO 接続が正常に確立されているか確認
+
+4. **Git操作エラー**
+   - GitManager の厳格なエラー処理により操作が中止される
+   - 物理ファイルとデータベースの同期状態を確認
+   - Git初期化が正常に完了しているか確認
 
 ## 🔄 アップデート履歴
 
 ### v1.0.0 (2024年)
 - 初回リリース
-- 基本IDE機能実装
-- Claude Code統合
-- Google OAuth認証
+- 二重ファイルシステム構造実装
+- 拡張Git統合（GitManager）
+- Socket.IO ベースClaude Code統合
+- Google OAuth認証（青山学院大学ドメイン限定）
 - 日本語UI完全対応
+- xterm.js ベースターミナル
+- Monaco Editor統合
+- 拡張ファイルシステムスキーマ
+
+## 🛠️ 技術詳細
+
+### pikeplace参考箇所
+- **Google OAuth実装**: `pikeplace/auth/`
+- **スモールブラウザ機能**: `pikeplace/static/kenya.html` の124行目周辺のiframe実装
+- **Monaco Editorの使用方法**: `pikeplace/static/lib/monaco-editor/`
+
+### Claude Code統合の仕様
+- APIキーは先生側で管理、学生からは見えない設計
+- プロンプト送信時に自動でgit add, commit, pushを実行
+- 学生は任意のタイミングでもgit操作可能
+- コミットメッセージは自動生成（プロンプト送信時）、手動入力（任意実行時）
+
+### エラー処理の方針
+- **厳格に失敗させる方針**（グレースフル・デグラデーション禁止）
+- データベーススキーマ未適用時は詳細エラーを返す
+- Git操作失敗時は具体的なstdout/stderrを含む
 
 ## 📞 サポート
 
 ### 技術サポート
-- **CLAUDE.md**: 技術詳細ドキュメント参照
+- **CLAUDE.md**: 詳細な技術仕様とアーキテクチャ
 - **GitHub Issues**: バグ報告・機能要望
+- **Socket.IO デバッグ**: Claude統合の通信問題
 
 ### 教育サポート
-- **教師向け**: 管理機能の使い方
-- **学生向け**: プロジェクト作成ガイド
+- **教師向け**: 管理機能・学生プロジェクト監視
+- **学生向け**: プロジェクト作成・AI支援活用ガイド
 
 ---
 

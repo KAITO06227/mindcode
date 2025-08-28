@@ -730,4 +730,230 @@ router.patch('/:projectId/files/:fileId/rename', verifyToken, async (req, res) =
   }
 });
 
+// POST /api/filesystem/:projectId/sync - Sync physical filesystem with database
+router.post('/:projectId/sync', verifyToken, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    
+    // Verify project ownership
+    const [projects] = await db.execute(
+      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
+      [projectId, req.user.id]
+    );
+
+    if (projects.length === 0) {
+      return res.status(404).json({ message: 'Project not found or access denied' });
+    }
+
+    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    
+    console.log('Starting filesystem sync for project:', projectId);
+    console.log('Project path:', projectPath);
+    
+    // Get existing files from database
+    const [existingFiles] = await db.execute(
+      'SELECT file_path, checksum FROM project_files WHERE project_id = ?',
+      [projectId]
+    );
+    
+    const dbFiles = new Map();
+    existingFiles.forEach(file => {
+      dbFiles.set(file.file_path, file.checksum);
+    });
+
+    const syncResult = {
+      created: [],
+      updated: [],
+      deleted: [],
+      errors: []
+    };
+
+    // Recursively scan physical directory
+    async function scanDirectory(dirPath, relativePath = '') {
+      try {
+        const entries = await fs.readdir(dirPath, { withFileTypes: true });
+        
+        for (const entry of entries) {
+          const fullPath = path.join(dirPath, entry.name);
+          const relativeFilePath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+          
+          // Skip hidden files and node_modules
+          if (entry.name.startsWith('.') || entry.name === 'node_modules') {
+            continue;
+          }
+          
+          if (entry.isDirectory()) {
+            // Handle directory
+            const dirExists = dbFiles.has(relativeFilePath);
+            if (!dirExists) {
+              try {
+                // Create folder in database
+                const [result] = await db.execute(`
+                  INSERT INTO project_files 
+                  (project_id, file_path, file_name, content, file_type, file_size, 
+                   permissions, checksum, is_binary, created_by, updated_by) 
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  [projectId, relativeFilePath, entry.name, '', 'folder', 0, 
+                   'rwxr-xr-x', '', false, req.user.id, req.user.id]
+                );
+                
+                const folderId = result.insertId;
+                
+                // Create version record
+                await db.execute(`
+                  INSERT INTO file_versions 
+                  (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
+                  VALUES (?, 1, 0, '', 'create', 'Folder created via sync', ?)`,
+                  [folderId, req.user.id]
+                );
+                
+                syncResult.created.push({
+                  type: 'folder',
+                  path: relativeFilePath,
+                  id: folderId
+                });
+                
+                console.log('Created folder in DB:', relativeFilePath);
+              } catch (error) {
+                syncResult.errors.push({
+                  path: relativeFilePath,
+                  error: `Failed to create folder: ${error.message}`
+                });
+              }
+            }
+            
+            // Recursively scan subdirectory
+            await scanDirectory(fullPath, relativeFilePath);
+            
+          } else if (entry.isFile()) {
+            // Handle file
+            try {
+              const content = await fs.readFile(fullPath, 'utf-8');
+              const checksum = calculateChecksum(content);
+              const fileSize = Buffer.byteLength(content, 'utf8');
+              const fileType = getFileType(entry.name);
+              const isBinary = isBinaryFile(content);
+              
+              const existingChecksum = dbFiles.get(relativeFilePath);
+              
+              if (!existingChecksum) {
+                // Create new file in database
+                const [result] = await db.execute(`
+                  INSERT INTO project_files 
+                  (project_id, file_path, file_name, content, file_type, file_size, 
+                   permissions, checksum, is_binary, created_by, updated_by) 
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  [projectId, relativeFilePath, entry.name, content, fileType, fileSize, 
+                   'rw-r--r--', checksum, isBinary, req.user.id, req.user.id]
+                );
+                
+                const fileId = result.insertId;
+                
+                // Create version record
+                await db.execute(`
+                  INSERT INTO file_versions 
+                  (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
+                  VALUES (?, 1, ?, ?, 'create', 'File created via sync', ?)`,
+                  [fileId, fileSize, checksum, req.user.id]
+                );
+                
+                syncResult.created.push({
+                  type: 'file',
+                  path: relativeFilePath,
+                  id: fileId,
+                  size: fileSize
+                });
+                
+                console.log('Created file in DB:', relativeFilePath);
+                
+              } else if (existingChecksum !== checksum) {
+                // Update existing file
+                const [fileResult] = await db.execute(
+                  'SELECT id FROM project_files WHERE project_id = ? AND file_path = ?',
+                  [projectId, relativeFilePath]
+                );
+                
+                if (fileResult.length > 0) {
+                  const fileId = fileResult[0].id;
+                  
+                  await db.execute(`
+                    UPDATE project_files 
+                    SET content = ?, file_size = ?, checksum = ?, 
+                        file_type = ?, is_binary = ?, updated_by = ?, updated_at = NOW()
+                    WHERE id = ?`,
+                    [content, fileSize, checksum, fileType, isBinary, req.user.id, fileId]
+                  );
+                  
+                  // Create version record
+                  const [versionResult] = await db.execute(
+                    'SELECT MAX(version_number) as max_version FROM file_versions WHERE file_id = ?',
+                    [fileId]
+                  );
+                  const nextVersion = (versionResult[0].max_version || 0) + 1;
+                  
+                  await db.execute(`
+                    INSERT INTO file_versions 
+                    (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
+                    VALUES (?, ?, ?, ?, 'update', 'File updated via sync', ?)`,
+                    [fileId, nextVersion, fileSize, checksum, req.user.id]
+                  );
+                  
+                  syncResult.updated.push({
+                    type: 'file',
+                    path: relativeFilePath,
+                    id: fileId,
+                    size: fileSize
+                  });
+                  
+                  console.log('Updated file in DB:', relativeFilePath);
+                }
+              }
+              
+            } catch (error) {
+              syncResult.errors.push({
+                path: relativeFilePath,
+                error: `Failed to process file: ${error.message}`
+              });
+            }
+          }
+        }
+      } catch (error) {
+        syncResult.errors.push({
+          path: dirPath,
+          error: `Failed to read directory: ${error.message}`
+        });
+      }
+    }
+
+    // Check if project directory exists
+    try {
+      await fs.access(projectPath);
+      await scanDirectory(projectPath);
+    } catch (error) {
+      return res.status(404).json({ 
+        message: 'Project directory not found',
+        path: projectPath 
+      });
+    }
+
+    console.log('Filesystem sync completed:', syncResult);
+
+    res.json({
+      message: 'Filesystem sync completed',
+      result: syncResult,
+      totalCreated: syncResult.created.length,
+      totalUpdated: syncResult.updated.length,
+      totalDeleted: syncResult.deleted.length,
+      totalErrors: syncResult.errors.length
+    });
+
+  } catch (error) {
+    console.error('Error syncing filesystem:', error);
+    res.status(500).json({ 
+      message: 'Error syncing filesystem',
+      error: error.message 
+    });
+  }
+});
+
 module.exports = router;

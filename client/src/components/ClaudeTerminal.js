@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import io from 'socket.io-client';
+import axios from 'axios';
 import '@xterm/xterm/css/xterm.css';
 
 const ClaudeTerminal = ({ projectId, userToken }) => {
@@ -12,6 +13,7 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
   const socketRef = useRef(null);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [claudeStatus, setClaudeStatus] = useState('initializing');
+  const [claudeCommandActive, setClaudeCommandActive] = useState(false);
 
 
   // Initialize terminal and socket connection
@@ -100,9 +102,43 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
       terminal.writeln('\r\n\x1b[31m接続が切断されました\x1b[0m\r\n');
     });
 
+    // Auto-sync filesystem after Claude Code commands
+    const autoSyncAfterClaude = async () => {
+      try {
+        console.log('Auto-syncing filesystem after Claude Code command...');
+        await axios.post(`/api/filesystem/${projectId}/sync`);
+        console.log('Auto-sync completed successfully');
+        
+        // Trigger file tree refresh if available
+        if (window.refreshFileTree) {
+          window.refreshFileTree();
+        }
+      } catch (error) {
+        console.warn('Auto-sync failed:', error);
+      }
+    };
+
     // Handle terminal output
     socket.on('output', (data) => {
       terminal.write(data);
+      
+      // Detect Claude Code command execution
+      const outputText = data.toString();
+      
+      // Detect when Claude Code command starts
+      if (outputText.includes('claude') && !claudeCommandActive) {
+        setClaudeCommandActive(true);
+        console.log('Claude Code command detected, starting monitoring...');
+      }
+      
+      // Detect when Claude Code command ends (prompt returns)
+      if (claudeCommandActive && (outputText.includes('$') || outputText.includes('>'))) {
+        setClaudeCommandActive(false);
+        console.log('Claude Code command completed, triggering auto-sync...');
+        
+        // Auto-sync after a short delay to ensure command is fully completed
+        setTimeout(autoSyncAfterClaude, 2000);
+      }
     });
 
     // Handle terminal input - send directly to server like ../claude
@@ -137,7 +173,7 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
         terminalInstanceRef.current.dispose();
       }
     };
-  }, [projectId, userToken]);
+  }, [projectId, userToken, claudeCommandActive]);
 
   // Status color helpers
   const getConnectionStatusColor = (status) => {

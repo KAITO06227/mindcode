@@ -8,7 +8,8 @@ import {
   FiEdit2,
   FiTrash2,
   FiUpload,
-  FiFolderPlus
+  FiFolderPlus,
+  FiRefreshCcw
 } from 'react-icons/fi';
 
 const TreeContainer = styled.div`
@@ -301,6 +302,29 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
     }
   };
 
+  const handleSync = async () => {
+    try {
+      const response = await axios.post(`/api/filesystem/${projectId}/sync`);
+      const result = response.data;
+      
+      // Update the file tree to show new files
+      onTreeUpdate();
+      
+      // Show sync result to user
+      const message = `同期が完了しました:\n` +
+        `新規作成: ${result.totalCreated} 件\n` +
+        `更新: ${result.totalUpdated} 件\n` +
+        `エラー: ${result.totalErrors} 件`;
+      
+      alert(message);
+      
+      console.log('Sync completed:', result);
+    } catch (error) {
+      console.error('Error syncing filesystem:', error);
+      alert('ファイルシステムの同期に失敗しました');
+    }
+  };
+
   const getFileType = (fileName) => {
     const extension = fileName.split('.').pop()?.toLowerCase();
     const typeMap = {
@@ -372,6 +396,9 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
           </ToolbarButton>
           <ToolbarButton onClick={() => fileInputRef.current?.click()} title="ファイルアップロード">
             <FiUpload size={16} />
+          </ToolbarButton>
+          <ToolbarButton onClick={handleSync} title="ファイルシステム同期（Claude Codeで作成されたファイルを表示）">
+            <FiRefreshCcw size={16} />
           </ToolbarButton>
           <ToolbarButton onClick={handleRename} disabled={!selectedItem} title="名前変更">
             <FiEdit2 size={16} />
