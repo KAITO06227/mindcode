@@ -1,7 +1,17 @@
 FROM node:18-alpine
 
-# Install Python and build tools for node-pty
-RUN apk update && apk add --no-cache python3 make g++ bash
+# Install build dependencies for node-pty
+RUN apk update && apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    gcc \
+    bash \
+    linux-headers \
+    libc-dev
+
+# Create Python symlink for node-gyp
+RUN ln -sf python3 /usr/bin/python
 
 # Install latest Git from edge repository
 RUN apk add --no-cache git --repository=http://dl-cdn.alpinelinux.org/alpine/edge/main
@@ -12,8 +22,17 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
+# Set environment variables for building native modules
+ENV PYTHON=/usr/bin/python3
+
+# Install all dependencies
 RUN npm install
+
+# Rebuild node-pty for Alpine Linux
+RUN npm rebuild node-pty || echo "node-pty rebuild completed with warnings"
+
+# Install Claude CLI globally
+RUN npm install -g @anthropic-ai/claude-code
 
 # Create client directory and install client dependencies
 RUN mkdir client

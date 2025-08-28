@@ -1,9 +1,20 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const http = require('http');
+const socketIo = require('socket.io');
 require('dotenv').config();
 
 const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+  cors: {
+    origin: ['http://localhost:3000', 'http://localhost:3001'],
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 
 // Middleware
@@ -39,6 +50,10 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/filesystem', fileSystemRoutes); // New filesystem API
 app.use('/api/version-control', versionControlRoutes); // New Git API
 
+// Initialize Socket.IO for terminal sessions (using fallback without node-pty)
+const claudeSocket = require('./sockets/claudeSocketSimple');
+claudeSocket(io);
+
 // Serve React app for all other routes (only in production)
 if (process.env.NODE_ENV === 'production') {
   app.get('*', (req, res) => {
@@ -52,8 +67,9 @@ app.use((error, req, res, next) => {
   res.status(500).json({ message: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Socket.IO enabled for Claude Terminal`);
 });
 
 module.exports = app;

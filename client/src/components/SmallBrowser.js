@@ -117,11 +117,48 @@ const ErrorTitle = styled.h3`
 const SmallBrowser = ({ projectId }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [navigationHistory, setNavigationHistory] = useState(['']);
+  const [navigationHistory] = useState(['']);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [htmlContent, setHtmlContent] = useState('');
-  const [currentUrl, setCurrentUrl] = useState('');
   const iframeRef = useRef(null);
+
+  // Helper function to find a file in the tree
+  const findFile = useCallback((tree, fileName) => {
+    for (const key in tree) {
+      const file = tree[key];
+      if (file && typeof file === 'object') {
+        const name = file.name || file.file_name || key;
+        if (name === fileName) {
+          return file;
+        }
+        // If it's a directory, search recursively
+        if (file.children && typeof file.children === 'object') {
+          const found = findFile(file.children, fileName);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  }, []);
+
+  // Helper function to find files by extension
+  const findFilesByExtension = useCallback((tree, extension) => {
+    const files = [];
+    for (const key in tree) {
+      const file = tree[key];
+      if (file && typeof file === 'object') {
+        const name = file.name || file.file_name || key;
+        if (name && name.endsWith(`.${extension}`)) {
+          files.push(file);
+        }
+        // If it's a directory, search recursively
+        if (file.children && typeof file.children === 'object') {
+          files.push(...findFilesByExtension(file.children, extension));
+        }
+      }
+    }
+    return files;
+  }, []);
 
   const loadProject = useCallback(async () => {
     if (!projectId) return;
@@ -216,9 +253,7 @@ const SmallBrowser = ({ projectId }) => {
         console.log('SmallBrowser: Setting HTML content:', htmlContent.length, 'characters');
         setHtmlContent(htmlContent);
         
-        // Set current URL for new tab functionality (kenya.html style)
-        const previewUrl = `/api/projects/${projectId}/preview`;
-        setCurrentUrl(previewUrl);
+        // URL for new tab functionality could be stored here if needed
       } else {
         setError('No index.html file found in project');
       }
@@ -228,7 +263,7 @@ const SmallBrowser = ({ projectId }) => {
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, findFile, findFilesByExtension]);
 
   useEffect(() => {
     loadProject();
@@ -241,38 +276,6 @@ const SmallBrowser = ({ projectId }) => {
     }
   }, [htmlContent]);
 
-  const findFile = (tree, fileName) => {
-    for (const key in tree) {
-      const item = tree[key];
-      if (item.type === 'file' && item.name === fileName) {
-        return item;
-      }
-      if (item.type === 'folder' && item.children) {
-        const found = findFile(item.children, fileName);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-
-  const findFilesByExtension = (tree, extension) => {
-    const files = [];
-    
-    const traverse = (node) => {
-      for (const key in node) {
-        const item = node[key];
-        if (item.type === 'file' && item.name.endsWith(`.${extension}`)) {
-          files.push(item);
-        }
-        if (item.type === 'folder' && item.children) {
-          traverse(item.children);
-        }
-      }
-    };
-    
-    traverse(tree);
-    return files;
-  };
 
   const updateIframe = (content) => {
     if (iframeRef.current && content) {

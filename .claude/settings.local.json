@@ -6,7 +6,10 @@
       "Bash(npm run server:dev:*)",
       "Bash(pkill:*)",
       "Bash(git log:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Read(/Users/skmtkit/Desktop/guitaradot/claude/**)",
+      "Read(/Users/skmtkit/Desktop/guitaradot/claude/public/**)",
+      "Read(/Users/skmtkit/Desktop/guitaradot/claude/public/**)"
     ],
     "deny": []
   }

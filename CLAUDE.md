@@ -9,13 +9,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **対象ユーザー**: 日本人学生・教職員（@gsuite.si.aoyama.ac.jpドメイン限定）
 - **言語**: すべてのUI、エラーメッセージ、コミュニケーションは日本語
 - **Claude Codeとの対話**: 日本語で行う
-- フロントエンド: React
-- バックエンド: Node.js + Express
-- データベース: MySQL
+- フロントエンド: React (Create React App, ポート3000)
+- バックエンド: Node.js + Express (ポート3001) 
+- データベース: MySQL (ポート3306)
 - 認証: Google OAuth
 - エディタ: Monaco Editor
-- AI支援: Claude Code統合
+- AI支援: Claude Code統合 (Socket.IO)
 - バージョン管理: Git統合
+- 開発プロキシ: クライアント → `http://localhost:3001`
 
 ## プロジェクト構造
 ```
@@ -219,12 +220,17 @@ DB_PASSWORD=password
 - **「エラーでも動く」修正は行わず、根本原因の修正に専念**
 - **データベーススキーマ未適用時は詳細エラーを返す**
 
+### 利用可能なコマンド
+
 ```bash
 # 依存関係のインストール
-npm run install:all
+npm run install:all          # ルートとclientの両方のnode_modules
 
-# プロダクションビルド  
-npm run build
+# ビルド関連
+npm run build                # クライアントのプロダクションビルド
+
+# テスト (クライアントのみ)
+cd client && npm test        # Jest テストの実行
 
 # データベーススキーマ適用
 mysql -u root -p webide < server/database/init.sql
@@ -233,8 +239,16 @@ mysql -u root -p webide < server/database/file_system_schema.sql
 # Docker環境でのデータベース初期化
 docker-compose exec db mysql -u root -ppassword webide < /docker-entrypoint-initdb.d/init.sql
 
-# 🚫 Claude Code実行禁止コマンド
-# npm run dev, docker compose up, npm run server:dev, npm run client:dev
+# ユーティリティスクリプト
+./apply_db_schema.sh         # データベーススキーマ適用スクリプト
+./setup_file_system.sh       # ファイルシステム設定スクリプト
+./reset-environment.sh       # 環境リセットスクリプト
+```
+
+**🚫 Claude Code実行禁止コマンド**
+```bash
+# これらのコマンドは実行してはいけません
+# npm run dev, docker compose up, npm run server:dev, npm run client:dev, npm start
 ```
 
 ## 特記事項
@@ -249,6 +263,16 @@ docker-compose exec db mysql -u root -ppassword webide < /docker-entrypoint-init
 - プロンプト送信時に自動でgit add, commit, pushを実行
 - 学生は任意のタイミングでもgit操作可能
 - コミットメッセージは自動生成（プロンプト送信時）、手動入力（任意実行時）
+
+### Socket.IO アーキテクチャ
+Claude Code統合はWebSocketベースの`claudeSocket.js`で実装：
+
+- **セッション管理**: `activeSessions` Mapがプロジェクト別Claude プロセスを管理
+- **プロセス起動**: `claude` コマンドを各プロジェクトディレクトリで子プロセスとして実行
+- **通信フロー**: 
+  1. クライアント → `claude_input` イベント → Claude プロセス stdin
+  2. Claude プロセス stdout/stderr → `claude_output` イベント → クライアント
+- **エラーハンドリング**: ENOENT エラーで Claude CLI 未インストールを検出
 
 ### セキュリティ考慮事項
 - 学生は自分のプロジェクトのみアクセス可能
@@ -293,4 +317,22 @@ docker-compose exec db mysql -u root -ppassword webide < /docker-entrypoint-init
 - `FileTree`: ファイル管理（CRUD、アップロード対応）
 - `GitPanel`: バージョン管理GUI  
 - `SmallBrowser`: HTML/CSS/JSプレビュー
+- `ClaudeCodeTerminal`: xterm.jsベースのClaude統合ターミナル
 - `AdminPage`: 教師用管理機能
+
+### フロントエンド主要ライブラリ
+- **`@monaco-editor/react`**: コードエディタ（VS Code エンジン）
+- **`@xterm/xterm`**: ターミナルUI (`@xterm/addon-fit`, `@xterm/addon-web-links`)
+- **`socket.io-client`**: Claude Code統合のWebSocket通信
+- **`react-router-dom`**: SPA ルーティング
+- **`styled-components`**: CSS-in-JS スタイリング
+- **`react-icons`**: アイコンコンポーネント
+
+### バックエンド主要ライブラリ
+- **`mysql2`**: MySQL データベース接続
+- **`passport` + `passport-google-oauth20`**: Google OAuth 認証
+- **`express-session` + `jsonwebtoken`**: セッション・JWT 管理
+- **`socket.io`**: Claude Code統合のWebSocket サーバー
+- **`multer`**: ファイルアップロード処理
+- **`node-pty`**: ターミナルエミュレーション（プロセス制御）
+- **`uuid`**: 一意ID生成（プロジェクト・ファイル識別）

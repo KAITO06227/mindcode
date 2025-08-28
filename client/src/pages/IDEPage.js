@@ -11,7 +11,7 @@ import {
 import FileTree from '../components/FileTree';
 import CodeEditor from '../components/CodeEditor';
 import SmallBrowser from '../components/SmallBrowser';
-import ClaudeCodeTerminal from '../components/ClaudeCodeTerminal';
+import ClaudeTerminal from '../components/ClaudeTerminal';
 import GitPanel from '../components/GitPanel';
 
 const IDEContainer = styled.div`
@@ -202,6 +202,20 @@ const IDEPage = () => {
       const response = await axios.get(`/api/projects/${projectId}`);
       console.log('Project fetched successfully:', response.data);
       setProject(response.data);
+      
+      // Start Claude Code when project is loaded
+      try {
+        console.log('Starting Claude Code for project:', projectId);
+        const claudeResponse = await axios.post(`/api/claude/start/${projectId}`);
+        console.log('Claude Code response:', claudeResponse.data);
+        if (claudeResponse.data.success) {
+          console.log('✓ Claude Code started');
+        }
+      } catch (claudeError) {
+        console.error('Failed to start Claude Code:', claudeError);
+        console.error('Error details:', claudeError.response?.data);
+        // Continue even if Claude fails to start
+      }
     } catch (error) {
       console.error('Error fetching project:', error);
       console.error('Error response:', error.response);
@@ -404,7 +418,10 @@ const IDEPage = () => {
           <TerminalContainer>
             <PanelHeader>ターミナル</PanelHeader>
             <div style={{ flex: 1, overflow: 'hidden' }}>
-              <ClaudeCodeTerminal projectId={projectId} />
+              <ClaudeTerminal 
+                projectId={projectId}
+                userToken={localStorage.getItem('token')}
+              />
             </div>
           </TerminalContainer>
           
