@@ -431,6 +431,7 @@ const IDEPage = () => {
             <div style={{ flex: 1, overflow: 'hidden' }}>
               <SmallBrowser 
                 projectId={projectId}
+                userToken={localStorage.getItem('token')}
               />
             </div>
           </BrowserContainer>

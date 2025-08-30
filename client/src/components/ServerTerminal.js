@@ -6,15 +6,29 @@ import io from 'socket.io-client';
 import axios from 'axios';
 import '@xterm/xterm/css/xterm.css';
 
-const ClaudeTerminal = ({ projectId, userToken }) => {
+const ServerTerminal = ({ projectId, userToken }) => {
   const terminalRef = useRef(null);
   const terminalInstanceRef = useRef(null);
   const fitAddonRef = useRef(null);
   const socketRef = useRef(null);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
-  const [claudeStatus, setClaudeStatus] = useState('initializing');
-  const [claudeCommandActive, setClaudeCommandActive] = useState(false);
+  const [serverStatus, setServerStatus] = useState('initializing');
 
+  // Auto-sync filesystem after server operations
+  const autoSyncAfterServerCommand = async () => {
+    try {
+      console.log('Auto-syncing filesystem after server command...');
+      await axios.post(`/api/filesystem/${projectId}/sync`);
+      console.log('Auto-sync completed successfully');
+      
+      // Trigger file tree refresh if available
+      if (window.refreshFileTree) {
+        window.refreshFileTree();
+      }
+    } catch (error) {
+      console.warn('Auto-sync failed:', error);
+    }
+  };
 
   // Initialize terminal and socket connection
   useEffect(() => {
@@ -72,14 +86,13 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
       setTimeout(() => fitAddon.fit(), 100);
     }
 
-    // Initialize socket connection
-    // Use different URL for development and production
+    // Initialize socket connection for server terminal
     const socketUrl = process.env.NODE_ENV === 'production' ? '/' : 'http://localhost:3001';
-    console.log('Connecting to Socket.IO server:', socketUrl);
+    console.log('Connecting to Server Terminal Socket.IO:', socketUrl);
     
     const socket = io(socketUrl, {
-      query: { projectId, token: userToken },
-      transports: ['polling', 'websocket'], // Try polling first, then websocket
+      query: { projectId, token: userToken, terminalType: 'server' },
+      transports: ['polling', 'websocket'],
       forceNew: true,
       reconnection: true,
       timeout: 20000
@@ -89,64 +102,43 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
 
     // Socket event handlers
     socket.on('connect', () => {
-      console.log('✅ Socket.IO connected successfully');
+      console.log('✅ Server Terminal Socket.IO connected successfully');
       setConnectionStatus('connected');
-      setClaudeStatus('ready');
-      terminal.writeln('\r\n🤖 MindCode Terminal に接続しました');
-      terminal.writeln('ターミナルを初期化中...\r\n');
+      setServerStatus('ready');
+      terminal.writeln('\r\n🚀 MindCode Server Terminal に接続しました');
+      terminal.writeln('Node.js プロジェクト用ターミナルを初期化中...\r\n');
     });
 
     socket.on('disconnect', (reason) => {
-      console.log('❌ Socket.IO disconnected:', reason);
+      console.log('❌ Server Terminal Socket.IO disconnected:', reason);
       setConnectionStatus('disconnected');
       terminal.writeln('\r\n\x1b[31m接続が切断されました\x1b[0m\r\n');
     });
-
-    // Auto-sync filesystem after Claude Code commands
-    const autoSyncAfterClaude = async () => {
-      try {
-        console.log('Auto-syncing filesystem after Claude Code command...');
-        await axios.post(`/api/filesystem/${projectId}/sync`);
-        console.log('Auto-sync completed successfully');
-        
-        // Trigger file tree refresh if available
-        if (window.refreshFileTree) {
-          window.refreshFileTree();
-        }
-      } catch (error) {
-        console.warn('Auto-sync failed:', error);
-      }
-    };
 
     // Handle terminal output
     socket.on('output', (data) => {
       terminal.write(data);
       
-      // Detect Claude Code command execution
+      // Detect common Node.js server commands and auto-sync
       const outputText = data.toString();
-      
-      // Detect when Claude Code command starts
-      if (outputText.includes('claude') && !claudeCommandActive) {
-        setClaudeCommandActive(true);
-        console.log('Claude Code command detected, starting monitoring...');
-      }
-      
-      // Detect when Claude Code command ends (prompt returns)
-      if (claudeCommandActive && (outputText.includes('$') || outputText.includes('>'))) {
-        setClaudeCommandActive(false);
-        console.log('Claude Code command completed, triggering auto-sync...');
+      if (outputText.includes('npm install') || 
+          outputText.includes('npm run') || 
+          outputText.includes('node ') ||
+          outputText.includes('Server running')) {
         
-        // Auto-sync after a short delay to ensure command is fully completed
-        setTimeout(autoSyncAfterClaude, 2000);
+        // Auto-sync after command completion (detect prompt return)
+        if (outputText.includes('$') || outputText.includes('>')) {
+          setTimeout(autoSyncAfterServerCommand, 1000);
+        }
       }
     });
 
-    // Handle terminal input - send directly to server like ../claude
+    // Handle terminal input
     terminal.onData((data) => {
       socket.emit('input', data);
     });
 
-    // Handle terminal resize - like ../claude
+    // Handle terminal resize
     terminal.onResize(({ cols, rows }) => {
       socket.emit('resize', { cols, rows });
     });
@@ -173,17 +165,16 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
         terminalInstanceRef.current.dispose();
       }
     };
-  }, [projectId, userToken, claudeCommandActive]);
+  }, [projectId, userToken]);
 
   return (
-    <div style={{ position: 'relative', height: '100%', width: '100%' }}>
+    <div style={{ position: 'relative', height: '100%', width: '100%' }}>      
       {/* Terminal container */}
       <div 
         ref={terminalRef} 
         style={{ 
-          height: '100%', 
+          height: '100%',
           width: '100%',
-          backgroundColor: '#0d1117',
           padding: '8px'
         }} 
       />
@@ -191,4 +182,4 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
   );
 };
 
-export default ClaudeTerminal;
+export default ServerTerminal;

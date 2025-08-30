@@ -11,7 +11,7 @@ module.exports = (io) => {
   io.on('connection', (socket) => {
     console.log('✅ New client connected:', socket.id);
     
-    const { projectId } = socket.handshake.query;
+    const { projectId, terminalType } = socket.handshake.query;
     
     if (!projectId) {
       console.error('❌ No project ID provided');
@@ -23,6 +23,7 @@ module.exports = (io) => {
     // Create project workspace directory
     const workspaceDir = path.join(__dirname, '../../user_projects/1', projectId);
     console.log('📁 Terminal workspace:', workspaceDir);
+    console.log('🔧 Terminal type:', terminalType || 'claude');
     
     // Determine shell based on platform
     const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
@@ -46,16 +47,27 @@ module.exports = (io) => {
       console.log('✅ Terminal spawned for socket:', socket.id);
       
       setTimeout(() => {
-        // Check if Claude is available and show welcome message
-        checkClaudeAvailability().then(available => {
-          if (available) {
-            socket.emit('output', '\r\n✅ Claude Code が利用可能です\r\n');
-            socket.emit('output', `📁 作業ディレクトリ: ${workspaceDir}\r\n\r\n`);
-          } else {
-            socket.emit('output', '\r\n⚠️  Claude Code が見つかりません。インストールが必要です。\r\n');
-            socket.emit('output', '詳細: https://docs.anthropic.com/claude/docs/claude-code\r\n\r\n');
-          }
-        });
+        if (terminalType === 'server') {
+          // Server terminal welcome message
+          socket.emit('output', '\r\n🚀 MindCode Server Terminal が利用可能です\r\n');
+          socket.emit('output', `📁 作業ディレクトリ: ${workspaceDir}\r\n`);
+          socket.emit('output', '💡 Node.js コマンドの実行が可能です:\r\n');
+          socket.emit('output', '   - npm install    (依存関係をインストール)\r\n');
+          socket.emit('output', '   - npm run dev    (開発サーバー起動)\r\n');
+          socket.emit('output', '   - npm start      (プロダクションサーバー起動)\r\n');
+          socket.emit('output', '   - node server.js (サーバー直接起動)\r\n\r\n');
+        } else {
+          // Claude Code terminal welcome message
+          checkClaudeAvailability().then(available => {
+            if (available) {
+              socket.emit('output', '\r\n✅ Claude Code が利用可能です\r\n');
+              socket.emit('output', `📁 作業ディレクトリ: ${workspaceDir}\r\n\r\n`);
+            } else {
+              socket.emit('output', '\r\n⚠️  Claude Code が見つかりません。インストールが必要です。\r\n');
+              socket.emit('output', '詳細: https://docs.anthropic.com/claude/docs/claude-code\r\n\r\n');
+            }
+          });
+        }
       }, 500);
     });
 

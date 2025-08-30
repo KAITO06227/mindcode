@@ -41,6 +41,7 @@ const claudeRoutes = require('./routes/claude');
 const adminRoutes = require('./routes/admin');
 const fileSystemRoutes = require('./routes/fileSystem');
 const versionControlRoutes = require('./routes/versionControl');
+const projectProxyRoutes = require('./routes/projectProxy');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
@@ -49,6 +50,10 @@ app.use('/api/claude', claudeRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/filesystem', fileSystemRoutes); // New filesystem API
 app.use('/api/version-control', versionControlRoutes); // New Git API
+app.use('/api/project-proxy', projectProxyRoutes); // Project proxy server
+
+// Set Socket.IO instance for project proxy
+projectProxyRoutes.setSocketIO(io);
 
 // Initialize Socket.IO for terminal sessions (using fallback without node-pty)
 const claudeSocket = require('./sockets/claudeSocketSimple');

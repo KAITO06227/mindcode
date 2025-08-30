@@ -1,12 +1,15 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
+import ProjectServerController from './ProjectServerController';
 import {
   FiArrowLeft,
   FiArrowRight,
   FiRefreshCw,
   FiExternalLink,
-  FiPlay
+  FiPlay,
+  FiMonitor,
+  FiServer
 } from 'react-icons/fi';
 
 const BrowserContainer = styled.div`
@@ -14,6 +17,34 @@ const BrowserContainer = styled.div`
   display: flex;
   flex-direction: column;
   background-color: #1e1e1e;
+`;
+
+const TabContainer = styled.div`
+  display: flex;
+  align-items: center;
+  background-color: #2d2d2d;
+  border-bottom: 1px solid #404040;
+`;
+
+const Tab = styled.button`
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  background-color: ${props => props.$active ? '#1e1e1e' : '#2d2d2d'};
+  border: none;
+  border-bottom: ${props => props.$active ? '2px solid #007acc' : '2px solid transparent'};
+  color: ${props => props.$active ? '#ffffff' : '#cccccc'};
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.875rem;
+  min-width: 140px;
+  justify-content: center;
+
+  &:hover {
+    background-color: ${props => props.$active ? '#1e1e1e' : '#404040'};
+    color: #ffffff;
+  }
 `;
 
 const BrowserToolbar = styled.div`
@@ -58,6 +89,13 @@ const BrowserLabel = styled.span`
   margin-right: 0.5rem;
 `;
 
+const ContentContainer = styled.div`
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+`;
+
 const IframeContainer = styled.div`
   flex: 1;
   position: relative;
@@ -70,6 +108,7 @@ const IFrame = styled.iframe`
   border: none;
   background-color: #ffffff;
 `;
+
 
 const LoadingOverlay = styled.div`
   position: absolute;
@@ -114,195 +153,53 @@ const ErrorTitle = styled.h3`
   margin-bottom: 0.5rem;
 `;
 
-const SmallBrowser = ({ projectId }) => {
+const SmallBrowser = ({ projectId, userToken }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [navigationHistory] = useState(['']);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [htmlContent, setHtmlContent] = useState('');
+  const [activeTab, setActiveTab] = useState('preview'); // 'preview' or 'server'
+  const [serverStatus, setServerStatus] = useState({
+    status: 'stopped',
+    port: null,
+    proxyUrl: null
+  });
   const iframeRef = useRef(null);
 
-  // Helper function to find a file in the tree
-  const findFile = useCallback((tree, fileName) => {
-    for (const key in tree) {
-      const file = tree[key];
-      if (file && typeof file === 'object') {
-        const name = file.name || file.file_name || key;
-        if (name === fileName) {
-          return file;
-        }
-        // If it's a directory, search recursively
-        if (file.children && typeof file.children === 'object') {
-          const found = findFile(file.children, fileName);
-          if (found) return found;
-        }
-      }
-    }
-    return null;
-  }, []);
-
-  // Helper function to find files by extension
-  const findFilesByExtension = useCallback((tree, extension) => {
-    const files = [];
-    for (const key in tree) {
-      const file = tree[key];
-      if (file && typeof file === 'object') {
-        const name = file.name || file.file_name || key;
-        if (name && name.endsWith(`.${extension}`)) {
-          files.push(file);
-        }
-        // If it's a directory, search recursively
-        if (file.children && typeof file.children === 'object') {
-          files.push(...findFilesByExtension(file.children, extension));
-        }
-      }
-    }
-    return files;
-  }, []);
-
-  const loadProject = useCallback(async () => {
+  // Fetch server status
+  const fetchServerStatus = useCallback(async () => {
     if (!projectId) return;
     
-    console.log('SmallBrowser: loadProject called for projectId:', projectId);
-    setLoading(true);
-    setError(null);
-
     try {
-      // Get the project's HTML content
-      const response = await axios.get(`/api/files/tree/${projectId}`);
-      const fileTree = response.data;
-
-      // Look for index.html
-      const indexFile = findFile(fileTree, 'index.html');
-      
-      if (indexFile) {
-        const fileResponse = await axios.get(`/api/files/${projectId}/${indexFile.id}`);
-        let htmlContent = fileResponse.data.content;
-
-        // Get CSS and JS files to embed
-        const cssFiles = findFilesByExtension(fileTree, 'css');
-        const jsFiles = findFilesByExtension(fileTree, 'js');
-
-        // Embed CSS files
-        for (const cssFile of cssFiles) {
-          try {
-            const cssResponse = await axios.get(`/api/files/${projectId}/${cssFile.id}`);
-            const cssContent = cssResponse.data.content;
-            
-            // Replace various CSS link patterns
-            const fileName = cssFile.name || cssFile.file_name;
-            
-            // Simple string replacements first
-            const exactPatterns = [
-              `<link rel="stylesheet" href="${fileName}">`,
-              `<link rel="stylesheet" href="${fileName}" />`,
-              `<link href="${fileName}" rel="stylesheet">`,
-              `<link href="${fileName}" rel="stylesheet" />`,
-              `<link rel="stylesheet" href="./${fileName}">`,
-              `<link rel="stylesheet" href="./${fileName}" />`
-            ];
-            
-            for (const pattern of exactPatterns) {
-              const regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-              htmlContent = htmlContent.replace(regex, `<style>\n${cssContent}\n</style>`);
-            }
-            
-            console.log(`Embedded CSS file: ${fileName}`);
-          } catch (error) {
-            console.warn(`Failed to embed CSS file ${cssFile.name}:`, error);
-          }
-        }
-
-        // Embed JS files
-        for (const jsFile of jsFiles) {
-          try {
-            const jsResponse = await axios.get(`/api/files/${projectId}/${jsFile.id}`);
-            const jsContent = jsResponse.data.content;
-            
-            // Replace various script src patterns
-            const fileName = jsFile.name || jsFile.file_name;
-            
-            const exactPatterns = [
-              `<script src="${fileName}"></script>`,
-              `<script src="${fileName}"></script>`,
-              `<script src="./${fileName}"></script>`,
-              `<script type="text/javascript" src="${fileName}"></script>`,
-              `<script type="text/javascript" src="./${fileName}"></script>`
-            ];
-            
-            for (const pattern of exactPatterns) {
-              const regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-              htmlContent = htmlContent.replace(regex, `<script>\n${jsContent}\n</script>`);
-            }
-            
-            console.log(`Embedded JS file: ${fileName}`);
-          } catch (error) {
-            console.warn(`Failed to embed JS file ${jsFile.name}:`, error);
-          }
-        }
-
-        // Clean up any remaining external references that couldn't be embedded
-        // Remove broken CSS links
-        htmlContent = htmlContent.replace(/<link[^>]*href=['"'][^'"]*\.css['"][^>]*>/gi, 
-          '<!-- CSS file not found and removed -->');
-        
-        // Remove broken script sources  
-        htmlContent = htmlContent.replace(/<script[^>]*src=['"'][^'"]*\.js['"][^>]*><\/script>/gi, 
-          '<!-- JS file not found and removed -->');
-
-        console.log('SmallBrowser: Setting HTML content:', htmlContent.length, 'characters');
-        setHtmlContent(htmlContent);
-        
-        // URL for new tab functionality could be stored here if needed
-      } else {
-        setError('No index.html file found in project');
-      }
+      const response = await axios.get(`/api/project-proxy/${projectId}/status`);
+      console.log('SmallBrowser: Server status response:', response.data);
+      setServerStatus(response.data);
+      setError(null);
     } catch (error) {
-      console.error('Error loading project:', error);
-      setError('Failed to load project preview');
-    } finally {
-      setLoading(false);
+      console.error('Error fetching server status:', error);
+      setServerStatus({
+        status: 'stopped',
+        port: null,
+        proxyUrl: null
+      });
     }
-  }, [projectId, findFile, findFilesByExtension]);
+  }, [projectId]);
 
+
+
+  // Initial server status fetch and periodic refresh
   useEffect(() => {
-    loadProject();
-  }, [loadProject]);
+    fetchServerStatus();
+    
+    const interval = setInterval(() => {
+      fetchServerStatus();
+    }, 5000); // Check server status every 5 seconds
 
-  // Update iframe when htmlContent changes
-  useEffect(() => {
-    if (htmlContent) {
-      updateIframe(htmlContent);
-    }
-  }, [htmlContent]);
+    return () => clearInterval(interval);
+  }, [fetchServerStatus]);
 
 
-  const updateIframe = (content) => {
-    if (iframeRef.current && content) {
-      const iframe = iframeRef.current;
-      
-      console.log('SmallBrowser: updateIframe called with content length:', content.length);
-      
-      // Always update - remove the content comparison that might be causing issues
-      console.log('SmallBrowser: Updating iframe with fresh content');
-      
-      // Clear existing content first
-      iframe.removeAttribute('srcdoc');
-      
-      // Add timestamp to force refresh
-      const timestampedContent = content.replace(
-        '<html',
-        `<html data-timestamp="${Date.now()}"`
-      );
-      
-      // Set new content
-      iframe.setAttribute('srcdoc', timestampedContent);
-      
-      console.log('SmallBrowser: Iframe updated successfully');
-    } else {
-      console.log('SmallBrowser: updateIframe - no iframe or content');
-    }
-  };
+
 
   const handleBack = () => {
     if (currentIndex > 0) {
@@ -320,29 +217,44 @@ const SmallBrowser = ({ projectId }) => {
 
   const handleRefresh = () => {
     console.log('SmallBrowser: Manual refresh triggered');
-    console.log('SmallBrowser: Current htmlContent:', htmlContent ? htmlContent.length : 'none');
     
-    // Kenya.html style: Reload project to get fresh content and update display
-    loadProject();
+    // Refresh server status and reload preview
+    fetchServerStatus();
   };
 
   const handleOpenInNewTab = () => {
-    // Use direct server URL to bypass React Router
-    if (projectId) {
-      const previewUrl = `http://localhost:3001/api/projects/${projectId}/preview`;
-      window.open(previewUrl, '_blank');
+    // Open server URL in new tab if server is running
+    if (serverStatus.status === 'running' && serverStatus.port) {
+      const serverUrl = `${window.location.protocol}//${window.location.hostname}:${serverStatus.port}`;
+      window.open(serverUrl, '_blank');
     } else {
-      console.warn('SmallBrowser: No project ID available');
+      console.warn('SmallBrowser: Server is not running');
     }
   };
 
   const handleRunProject = () => {
-    loadProject();
+    fetchServerStatus();
   };
 
-  if (error) {
+  if (error && activeTab === 'preview') {
     return (
       <BrowserContainer>
+        <TabContainer>
+          <Tab 
+            $active={activeTab === 'preview'} 
+            onClick={() => setActiveTab('preview')}
+          >
+            <FiMonitor size={16} />
+            スモールブラウザー
+          </Tab>
+          <Tab 
+            $active={activeTab === 'server'} 
+            onClick={() => setActiveTab('server')}
+          >
+            <FiServer size={16} />
+            サーバー
+          </Tab>
+        </TabContainer>
         <BrowserToolbar>
           <ToolbarButton onClick={handleRunProject}>
             <FiPlay size={14} />
@@ -352,7 +264,7 @@ const SmallBrowser = ({ projectId }) => {
         <ErrorMessage>
           <ErrorTitle>Preview Error</ErrorTitle>
           <p>{error}</p>
-          <ToolbarButton onClick={loadProject} style={{ marginTop: '1rem', width: 'auto', padding: '0.5rem 1rem' }}>
+          <ToolbarButton onClick={fetchServerStatus} style={{ marginTop: '1rem', width: 'auto', padding: '0.5rem 1rem' }}>
             <FiRefreshCw size={14} style={{ marginRight: '0.5rem' }} />
             Retry
           </ToolbarButton>
@@ -363,55 +275,138 @@ const SmallBrowser = ({ projectId }) => {
 
   return (
     <BrowserContainer>
-      <BrowserToolbar>
-        <ToolbarButton
-          onClick={handleBack}
-          disabled={currentIndex === 0}
-          title="Back"
+      {/* Tab Navigation */}
+      <TabContainer>
+        <Tab 
+          $active={activeTab === 'preview'} 
+          onClick={() => setActiveTab('preview')}
         >
-          <FiArrowLeft size={14} />
-        </ToolbarButton>
-        
-        <ToolbarButton
-          onClick={handleForward}
-          disabled={currentIndex >= navigationHistory.length - 1}
-          title="Forward"
+          <FiMonitor size={16} />
+          スモールブラウザー
+        </Tab>
+        <Tab 
+          $active={activeTab === 'server'} 
+          onClick={() => setActiveTab('server')}
         >
-          <FiArrowRight size={14} />
-        </ToolbarButton>
-        
-        <ToolbarButton
-          onClick={handleRefresh}
-          title="Refresh"
-        >
-          <FiRefreshCw size={14} />
-        </ToolbarButton>
-        
-        <BrowserLabel>スモールブラウザ</BrowserLabel>
-        
-        <ToolbarButton
-          onClick={handleOpenInNewTab}
-          title="Open in new tab"
-          disabled={!htmlContent}
-        >
-          <FiExternalLink size={14} />
-        </ToolbarButton>
-      </BrowserToolbar>
+          <FiServer size={16} />
+          サーバー
+        </Tab>
+      </TabContainer>
 
-      <IframeContainer>
-        {loading && (
-          <LoadingOverlay>
-            <LoadingSpinner />
-          </LoadingOverlay>
+      {/* Tab Content */}
+      <ContentContainer>
+        {activeTab === 'preview' && (
+          <>
+            <BrowserToolbar>
+              <ToolbarButton
+                onClick={handleBack}
+                disabled={currentIndex === 0}
+                title="Back"
+              >
+                <FiArrowLeft size={14} />
+              </ToolbarButton>
+              
+              <ToolbarButton
+                onClick={handleForward}
+                disabled={currentIndex >= navigationHistory.length - 1}
+                title="Forward"
+              >
+                <FiArrowRight size={14} />
+              </ToolbarButton>
+              
+              <ToolbarButton
+                onClick={handleRefresh}
+                title="Refresh"
+              >
+                <FiRefreshCw size={14} />
+              </ToolbarButton>
+              
+              <BrowserLabel>プレビュー</BrowserLabel>
+              
+              <ToolbarButton
+                onClick={handleOpenInNewTab}
+                title="Open in new tab"
+                disabled={serverStatus.status !== 'running'}
+              >
+                <FiExternalLink size={14} />
+              </ToolbarButton>
+            </BrowserToolbar>
+
+            <IframeContainer>
+              {loading && (
+                <LoadingOverlay>
+                  <LoadingSpinner />
+                </LoadingOverlay>
+              )}
+              
+              {serverStatus.status === 'running' && serverStatus.proxyUrl ? (
+                <>
+                  <div style={{ 
+                    padding: '0.5rem', 
+                    backgroundColor: '#f0f0f0', 
+                    borderBottom: '1px solid #ccc',
+                    fontSize: '0.75rem',
+                    fontFamily: 'monospace'
+                  }}>
+                    プレビューURL: {`${window.location.protocol}//${window.location.hostname}:${serverStatus.port}`}
+                  </div>
+                  <IFrame
+                    ref={iframeRef}
+                    title="Server Preview"
+                    sandbox="allow-scripts allow-forms allow-same-origin"
+                    src={`${window.location.protocol}//${window.location.hostname}:${serverStatus.port}`}
+                    onLoad={() => {
+                      const iframeSrc = `${window.location.protocol}//${window.location.hostname}:${serverStatus.port}`;
+                      console.log('SmallBrowser: Iframe loaded with src:', iframeSrc);
+                      console.log('SmallBrowser: ServerStatus:', serverStatus);
+                      console.log('SmallBrowser: Current iframe URL:', iframeRef.current?.src);
+                    }}
+                  />
+                </>
+              ) : (
+                <ErrorMessage>
+                  <ErrorTitle>サーバープレビュー</ErrorTitle>
+                  <p>
+                    {serverStatus.status === 'starting' ? 
+                      'サーバーを起動中です...' : 
+                      'プレビューを表示するにはサーバーを起動してください'}
+                  </p>
+                  <div style={{ marginTop: '1rem', color: '#888888', fontSize: '0.875rem' }}>
+                    現在の状態: {
+                      serverStatus.status === 'stopped' ? 'サーバー停止中' :
+                      serverStatus.status === 'starting' ? 'サーバー起動中' :
+                      serverStatus.status === 'error' ? 'サーバーエラー' :
+                      '不明な状態'
+                    }
+                  </div>
+                </ErrorMessage>
+              )}
+            </IframeContainer>
+          </>
         )}
-        
-        <IFrame
-          ref={iframeRef}
-          title="Project Preview"
-          sandbox="allow-scripts allow-forms allow-same-origin"
-          srcDoc={htmlContent}
-        />
-      </IframeContainer>
+
+
+        {activeTab === 'server' && (
+          <div style={{ 
+            padding: '1rem', 
+            backgroundColor: '#1e1e1e', 
+            height: '100%', 
+            overflow: 'auto',
+            display: 'flex',
+            flexDirection: 'column'
+          }}>
+            <div style={{ marginBottom: '1rem', color: '#ffffff' }}>
+              <h3 style={{ margin: '0 0 0.5rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <FiServer size={20} />
+                Node.js プロジェクトサーバー
+              </h3>
+            </div>
+            <div style={{ flex: 1, overflow: 'auto' }}>
+              <ProjectServerController projectId={projectId} />
+            </div>
+          </div>
+        )}
+      </ContentContainer>
     </BrowserContainer>
   );
 };
