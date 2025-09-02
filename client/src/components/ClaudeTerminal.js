@@ -13,7 +13,8 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
   const socketRef = useRef(null);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [claudeStatus, setClaudeStatus] = useState('initializing');
-  const [claudeCommandActive, setClaudeCommandActive] = useState(false);
+  // Track command activity without retriggering effect
+  const claudeCommandActiveRef = useRef(false);
 
 
   // Initialize terminal and socket connection
@@ -126,14 +127,14 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
       const outputText = data.toString();
       
       // Detect when Claude Code command starts
-      if (outputText.includes('claude') && !claudeCommandActive) {
-        setClaudeCommandActive(true);
+      if (outputText.includes('claude') && !claudeCommandActiveRef.current) {
+        claudeCommandActiveRef.current = true;
         console.log('Claude Code command detected, starting monitoring...');
       }
       
       // Detect when Claude Code command ends (prompt returns)
-      if (claudeCommandActive && (outputText.includes('$') || outputText.includes('>'))) {
-        setClaudeCommandActive(false);
+      if (claudeCommandActiveRef.current && (outputText.includes('$') || outputText.includes('>'))) {
+        claudeCommandActiveRef.current = false;
         console.log('Claude Code command completed, triggering auto-sync...');
         
         // Auto-sync after a short delay to ensure command is fully completed
@@ -173,7 +174,7 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
         terminalInstanceRef.current.dispose();
       }
     };
-  }, [projectId, userToken, claudeCommandActive]);
+  }, [projectId, userToken]);
 
   // Status color helpers
   const getConnectionStatusColor = (status) => {
