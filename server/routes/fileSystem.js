@@ -90,7 +90,12 @@ async function logFileAccess(fileId, userId, accessType, req) {
 // POST /api/filesystem/:projectId/files - Create or update file/folder
 router.post('/:projectId/files', verifyToken, async (req, res) => {
   try {
-    const { filePath, fileName, content = '', isFolder = false } = req.body;
+    const {
+      filePath,
+      fileName,
+      content = '',
+      isFolder = false
+    } = req.body;
     const projectId = req.params.projectId;
     
     console.log('File/Folder save request:', { filePath, fileName, contentLength: content.length, isFolder });
@@ -122,21 +127,18 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
     }
     const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
     const fullFilePath = path.join(projectPath, relativeFilePath);
-    
+
     console.log('Paths:', { projectPath, relativeFilePath, fullFilePath, isFolder });
-    
+
     if (isFolder) {
-      // フォルダの場合
       await fs.mkdir(fullFilePath, { recursive: true });
       console.log('Folder created successfully:', fullFilePath);
-      
-      // フォルダは内容がないのでダミーデータを設定
-      const checksum = '';
+
       const fileSize = 0;
+      const checksum = '';
       const fileType = 'folder';
       const isBinary = false;
-      
-      // フォルダをデータベースに記録する（ファイルとして扱うが、typeで判別）
+
       const [result] = await db.execute(`
         INSERT INTO project_files 
         (project_id, file_path, file_name, content, file_type, file_size, 
@@ -145,20 +147,18 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
         [projectId, relativeFilePath, fileName, '', fileType, fileSize, 
          'rwxr-xr-x', checksum, isBinary, req.user.id, req.user.id]
       );
-      
+
       const folderId = result.insertId;
-      
-      // Create initial version record
+
       await db.execute(`
         INSERT INTO file_versions 
         (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
         VALUES (?, 1, ?, ?, 'create', 'Folder created via API', ?)`,
         [folderId, fileSize, checksum, req.user.id]
       );
-      
-      // Log access
+
       await logFileAccess(folderId, req.user.id, 'write', req);
-      
+
       return res.status(201).json({
         id: folderId,
         filePath: relativeFilePath,
@@ -169,33 +169,27 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
         isFolder: true
       });
     }
-    
-    // ファイルの場合の処理
-    // Calculate file metadata
+
     const checksum = calculateChecksum(content);
     const fileSize = Buffer.byteLength(content, 'utf8');
     const fileType = getFileType(fileName);
     const isBinary = isBinaryFile(content);
 
-    // Create parent directories if needed
     const parentDir = path.dirname(fullFilePath);
     await fs.mkdir(parentDir, { recursive: true });
 
-    // Write file to disk
     await fs.writeFile(fullFilePath, content);
     console.log('File written successfully:', fullFilePath);
 
-    // Check if file exists in database
     const [existingFiles] = await db.execute(
       'SELECT * FROM project_files WHERE project_id = ? AND file_path = ?',
       [projectId, relativeFilePath]
     );
 
     let fileId;
-    let isUpdate = existingFiles.length > 0;
+    let isUpdate = false;
 
-    if (isUpdate) {
-      // Update existing file
+    if (existingFiles.length > 0) {
       fileId = existingFiles[0].id;
       await db.execute(`
         UPDATE project_files 
@@ -204,22 +198,22 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
         WHERE id = ?`,
         [content, fileSize, checksum, fileType, isBinary, req.user.id, fileId]
       );
-      
-      // Create version record
+
       const [versionResult] = await db.execute(
         'SELECT MAX(version_number) as max_version FROM file_versions WHERE file_id = ?',
         [fileId]
       );
       const nextVersion = (versionResult[0].max_version || 0) + 1;
-      
+
       await db.execute(`
         INSERT INTO file_versions 
         (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
         VALUES (?, ?, ?, ?, 'update', 'File updated via API', ?)`,
         [fileId, nextVersion, fileSize, checksum, req.user.id]
       );
+
+      isUpdate = true;
     } else {
-      // Create new file
       const [result] = await db.execute(`
         INSERT INTO project_files 
         (project_id, file_path, file_name, content, file_type, file_size, 
@@ -228,10 +222,9 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
         [projectId, relativeFilePath, fileName, content, fileType, fileSize, 
          'rw-r--r--', checksum, isBinary, req.user.id, req.user.id]
       );
-      
+
       fileId = result.insertId;
-      
-      // Create initial version record
+
       await db.execute(`
         INSERT INTO file_versions 
         (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
@@ -240,7 +233,6 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
       );
     }
 
-    // Log access
     await logFileAccess(fileId, req.user.id, 'write', req);
 
     res.status(isUpdate ? 200 : 201).json({
@@ -250,7 +242,8 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
       fileSize,
       checksum,
       fileType,
-      isUpdate
+      isUpdate,
+      isFolder: false
     });
 
   } catch (error) {
@@ -337,7 +330,6 @@ router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
 router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
   try {
     const { projectId, fileId } = req.params;
-    const { autoCommit = true } = req.body;
 
     // Get file with project ownership check
     const [files] = await db.execute(`
@@ -414,40 +406,13 @@ router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
       await db.execute('DELETE FROM project_files WHERE id = ?', [fileToDelete.id]);
     }
 
-    // Git commit if auto-commit is enabled
-    let gitResult = null;
-    if (autoCommit) {
-      try {
-        const gitManager = new GitManager(projectPath);
-        if (await gitManager.isInitialized()) {
-          // Stage all deleted files for git
-          for (const fileToDelete of filesToDelete) {
-            await gitManager.addFile(fileToDelete.file_path);
-          }
-          
-          const commitMessage = file.file_type === 'folder' 
-            ? `Delete folder ${file.file_name} and its contents (${filesToDelete.length} items)`
-            : `Delete ${file.file_name}`;
-            
-          gitResult = await gitManager.commit(
-            commitMessage, 
-            req.user.name, 
-            req.user.email
-          );
-        }
-      } catch (error) {
-        console.warn('Git commit failed:', error.message);
-      }
-    }
-
     res.json({
       message: file.file_type === 'folder' 
         ? `Folder and ${filesToDelete.length} items deleted successfully`
         : 'File deleted successfully',
       fileName: file.file_name,
       filePath: file.file_path,
-      deletedCount: filesToDelete.length,
-      git: gitResult
+      deletedCount: filesToDelete.length
     });
 
   } catch (error) {
@@ -554,7 +519,6 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
   try {
     const { projectId } = req.params;
     const targetPath = req.body.targetPath || '';
-    const autoCommit = req.body.autoCommit !== 'false';
     
     // Verify project ownership
     const [projects] = await db.execute(
@@ -616,31 +580,8 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
       }
     }
 
-    // Git commit if auto-commit is enabled
-    let gitResult = null;
-    if (autoCommit && uploadedFiles.length > 0) {
-      try {
-        const gitManager = new GitManager(projectPath);
-        if (await gitManager.isInitialized()) {
-          // Add all uploaded files
-          for (const uploadedFile of uploadedFiles) {
-            await gitManager.addFile(uploadedFile.path);
-          }
-          
-          const message = uploadedFiles.length === 1 
-            ? `Upload ${uploadedFiles[0].filename}`
-            : `Upload ${uploadedFiles.length} files`;
-          
-          gitResult = await gitManager.commit(message, req.user.name, req.user.email);
-        }
-      } catch (error) {
-        console.warn('Git commit failed:', error.message);
-      }
-    }
-
     res.json({ 
-      files: uploadedFiles,
-      git: gitResult
+      files: uploadedFiles
     });
 
   } catch (error) {

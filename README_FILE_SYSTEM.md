@@ -20,7 +20,7 @@ MindCodeのファイル保存システムは、Gitベースのバージョン管
 ```
 
 ### データフロー
-1. **ファイル作成/更新** → ファイルシステム書き込み → DB保存 → Git コミット
+1. **ファイル作成/更新** → ファイルシステム書き込み → DB保存（Gitコミットは手動操作）
 2. **ファイル読み出し** → DB検索 → ファイルシステム読み込み → アクセスログ
 3. **バージョン管理** → Git操作 → DB状態更新
 
@@ -37,8 +37,7 @@ MindCodeのファイル保存システムは、Gitベースのバージョン管
   "fileName": "index.html",
   "filePath": "src", 
   "content": "<!DOCTYPE html>...",
-  "permissions": "rw-r--r--",
-  "autoCommit": true
+  "permissions": "rw-r--r--"
 }
 ```
 
@@ -53,11 +52,7 @@ MindCodeのファイル保存システムは、Gitベースのバージョン管
   "fileType": "html",
   "permissions": "rw-r--r--",
   "isBinary": false,
-  "isUpdate": false,
-  "git": {
-    "success": true,
-    "commitHash": "abc123..."
-  }
+  "isUpdate": false
 }
 ```
 
@@ -91,12 +86,7 @@ MindCodeのファイル保存システムは、Gitベースのバージョン管
 #### DELETE /:projectId/files/:fileId
 ファイルの削除
 
-**リクエスト:**
-```json
-{
-  "autoCommit": true
-}
-```
+**リクエストボディ:** なし
 
 #### GET /:projectId/tree
 プロジェクトのファイルツリー取得（メタデータ付き）
@@ -128,7 +118,6 @@ MindCodeのファイル保存システムは、Gitベースのバージョン管
 **リクエスト:** `multipart/form-data`
 - `files`: アップロードするファイル群
 - `targetPath`: 対象ディレクトリ
-- `autoCommit`: 自動コミット有効/無効
 
 ### バージョン管理 (`/api/version-control`)
 
@@ -305,8 +294,7 @@ const createFile = async (projectId, token) => {
   const response = await axios.post(`/api/filesystem/${projectId}/files`, {
     fileName: 'app.js',
     filePath: 'src',
-    content: 'console.log("Hello, World!");',
-    autoCommit: true
+    content: 'console.log("Hello, World!");'
   }, {
     headers: { Authorization: `Bearer ${token}` }
   });
@@ -333,8 +321,7 @@ curl -X POST http://localhost:3001/api/filesystem/PROJECT_ID/files \
   -H "Content-Type: application/json" \
   -d '{
     "fileName": "test.html",
-    "content": "<h1>Hello</h1>",
-    "autoCommit": true
+    "content": "<h1>Hello</h1>"
   }'
 
 # ファイル取得
@@ -348,10 +335,10 @@ curl -X GET http://localhost:3001/api/version-control/PROJECT_ID/history \
 
 ## 特徴
 
-### 1. 自動バージョン管理
-- ファイル保存時の自動Gitコミット
-- バージョン番号の自動採番
-- コミットハッシュとDBレコードの関連付け
+### 1. バージョン管理
+- ファイル保存時にデータベース上のバージョン履歴を自動作成
+- GitコミットはGitパネルやAPI経由で明示的に実行
+- コミットハッシュとDBレコードの関連付けに対応
 
 ### 2. 完全なメタデータ管理
 - ファイルサイズ、チェックサム、権限

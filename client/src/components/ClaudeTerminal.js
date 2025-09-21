@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -11,8 +11,6 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
   const terminalInstanceRef = useRef(null);
   const fitAddonRef = useRef(null);
   const socketRef = useRef(null);
-  const [connectionStatus, setConnectionStatus] = useState('disconnected');
-  const [claudeStatus, setClaudeStatus] = useState('initializing');
   // Track command activity without retriggering effect
   const claudeCommandActiveRef = useRef(false);
 
@@ -91,15 +89,12 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
     // Socket event handlers
     socket.on('connect', () => {
       console.log('✅ Socket.IO connected successfully');
-      setConnectionStatus('connected');
-      setClaudeStatus('ready');
       terminal.writeln('\r\n🤖 MindCode Terminal に接続しました');
       terminal.writeln('ターミナルを初期化中...\r\n');
     });
 
     socket.on('disconnect', (reason) => {
       console.log('❌ Socket.IO disconnected:', reason);
-      setConnectionStatus('disconnected');
       terminal.writeln('\r\n\x1b[31m接続が切断されました\x1b[0m\r\n');
     });
 
@@ -176,60 +171,8 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
     };
   }, [projectId, userToken]);
 
-  // Status color helpers
-  const getConnectionStatusColor = (status) => {
-    switch (status) {
-      case 'connected': return '#28a745';
-      case 'connecting': return '#ffc107';
-      case 'disconnected': return '#6c757d';
-      default: return '#6c757d';
-    }
-  };
-
-  const getClaudeStatusColor = (status) => {
-    switch (status) {
-      case 'ready': return '#28a745';
-      case 'initializing': return '#ffc107';
-      case 'error': return '#dc3545';
-      default: return '#6c757d';
-    }
-  };
-
   return (
     <div style={{ position: 'relative', height: '100%', width: '100%' }}>
-      {/* Status indicators */}
-      <div style={{
-        position: 'absolute',
-        top: '8px',
-        right: '8px',
-        zIndex: 10,
-        display: 'flex',
-        gap: '8px',
-        fontSize: '11px',
-        fontFamily: 'monospace'
-      }}>
-        <div style={{
-          backgroundColor: 'rgba(0,0,0,0.8)',
-          color: getConnectionStatusColor(connectionStatus),
-          padding: '4px 8px',
-          borderRadius: '4px',
-          border: `1px solid ${getConnectionStatusColor(connectionStatus)}`,
-          backdropFilter: 'blur(4px)'
-        }}>
-          接続: {connectionStatus}
-        </div>
-        <div style={{
-          backgroundColor: 'rgba(0,0,0,0.8)',
-          color: getClaudeStatusColor(claudeStatus),
-          padding: '4px 8px',
-          borderRadius: '4px',
-          border: `1px solid ${getClaudeStatusColor(claudeStatus)}`,
-          backdropFilter: 'blur(4px)'
-        }}>
-          Terminal: {claudeStatus}
-        </div>
-      </div>
-      
       {/* Terminal container */}
       <div 
         ref={terminalRef} 
@@ -237,7 +180,9 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
           height: '100%', 
           width: '100%',
           backgroundColor: '#0d1117',
-          padding: '8px'
+          padding: '8px',
+          paddingBottom: '16px',
+          boxSizing: 'border-box'
         }} 
       />
     </div>

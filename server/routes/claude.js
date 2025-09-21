@@ -9,6 +9,33 @@ const router = express.Router();
 // Store active Claude processes
 const claudeProcesses = new Map();
 
+async function ensureClaudeCliConfig(projectPath) {
+  try {
+    /*
+    const apiKey = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return;
+    }
+
+    const configDir = path.join(projectPath, '.config', 'claude');
+    const configPath = path.join(configDir, 'config.json');
+
+    const config = {
+      auth: {
+        method: 'api-key',
+        apiKey,
+        createdAt: new Date().toISOString()
+      }
+    };
+
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
+    */
+  } catch (error) {
+    console.warn('Failed to ensure Claude CLI config:', error.message);
+  }
+}
+
 // Start Claude Code for a project
 router.post('/start/:projectId', verifyToken, async (req, res) => {
   try {
@@ -36,10 +63,20 @@ router.post('/start/:projectId', verifyToken, async (req, res) => {
       });
     }
 
+    await ensureClaudeCliConfig(projectPath);
+
     // Start Claude Code
     const claudeProcess = spawn('npx', ['claude'], {
       cwd: projectPath,
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        CLAUDE_API_KEY: process.env.CLAUDE_API_KEY,
+        ANTHROPIC_API_KEY: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY,
+        XDG_CONFIG_HOME: path.join(projectPath, '.config'),
+        CLAUDE_CONFIG_DIR: path.join(projectPath, '.config', 'claude'),
+        HOME: projectPath
+      }
     });
 
     // Log stdout for debugging

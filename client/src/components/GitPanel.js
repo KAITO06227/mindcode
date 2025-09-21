@@ -361,6 +361,19 @@ const GitPanel = ({ projectId, onRefresh }) => {
     }
   }, [projectId, fetchGitData]);
 
+  useEffect(() => {
+    const handleExternalUpdate = () => {
+      if (projectId) {
+        fetchGitData();
+      }
+    };
+
+    window.addEventListener('mindcode:gitUpdated', handleExternalUpdate);
+    return () => {
+      window.removeEventListener('mindcode:gitUpdated', handleExternalUpdate);
+    };
+  }, [projectId, fetchGitData]);
+
   // 相対時間の計算
   const getRelativeTime = (date) => {
     const now = new Date();

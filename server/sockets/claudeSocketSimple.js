@@ -1,18 +1,46 @@
 const pty = require('node-pty');
 const path = require('path');
 const { spawn } = require('child_process');
+const fs = require('fs').promises;
 
 // Store active terminal sessions
 const terminals = {};
+
+async function ensureClaudeCliConfig(workspaceDir) {
+  try {
+    /*
+    const apiKey = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return;
+    }
+
+    const configDir = path.join(workspaceDir, '.config', 'claude');
+    const configPath = path.join(configDir, 'config.json');
+
+    const config = {
+      auth: {
+        method: 'api-key',
+        apiKey,
+        createdAt: new Date().toISOString()
+      }
+    };
+
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
+    */
+  } catch (error) {
+    console.warn('Failed to ensure Claude CLI config:', error.message);
+  }
+}
 
 module.exports = (io) => {
   console.log('Socket.IO server initialized for MindCode Terminal');
   
   io.on('connection', (socket) => {
     console.log('✅ New client connected:', socket.id);
-    
+
     const { projectId } = socket.handshake.query;
-    
+
     if (!projectId) {
       console.error('❌ No project ID provided');
       socket.emit('claude_error', { message: 'Project ID is required' });
@@ -23,6 +51,10 @@ module.exports = (io) => {
     // Create project workspace directory
     const workspaceDir = path.join(__dirname, '../../user_projects/1', projectId);
     console.log('📁 Terminal workspace:', workspaceDir);
+
+    ensureClaudeCliConfig(workspaceDir).catch((error) => {
+      console.warn('Unable to prepare Claude CLI config:', error.message);
+    });
     
     // Determine shell based on platform
     const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
@@ -35,7 +67,11 @@ module.exports = (io) => {
       cwd: workspaceDir,
       env: {
         ...process.env,
-        CLAUDE_API_KEY: process.env.CLAUDE_API_KEY
+        CLAUDE_API_KEY: process.env.CLAUDE_API_KEY,
+        ANTHROPIC_API_KEY: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY,
+        XDG_CONFIG_HOME: path.join(workspaceDir, '.config'),
+        CLAUDE_CONFIG_DIR: path.join(workspaceDir, '.config', 'claude'),
+        HOME: workspaceDir
       }
     });
 

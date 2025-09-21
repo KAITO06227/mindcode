@@ -70,8 +70,7 @@ async function testFileCreation() {
       fileName: 'test.html',
       filePath: '',
       content: fileContent,
-      permissions: 'rw-r--r--',
-      autoCommit: true
+      permissions: 'rw-r--r--'
     }, {
       headers: { Authorization: `Bearer ${authToken}` }
     });
@@ -79,8 +78,7 @@ async function testFileCreation() {
     console.log('✅ ファイル作成成功:', {
       fileId: response.data.id,
       fileName: response.data.fileName,
-      checksum: response.data.checksum,
-      git: response.data.git
+      checksum: response.data.checksum
     });
     
     return response.data.id;
@@ -127,16 +125,14 @@ async function testFileUpdate(fileId) {
     const response = await axios.post(`${API_BASE}/filesystem/${projectId}/files`, {
       fileName: 'test.html',
       filePath: '',
-      content: updatedContent,
-      autoCommit: true
+      content: updatedContent
     }, {
       headers: { Authorization: `Bearer ${authToken}` }
     });
     
     console.log('✅ ファイル更新成功:', {
       isUpdate: response.data.isUpdate,
-      newChecksum: response.data.checksum,
-      git: response.data.git
+      newChecksum: response.data.checksum
     });
   } catch (error) {
     console.error('❌ ファイル更新エラー:', error.response?.data || error.message);

@@ -10,6 +10,7 @@ class GitManager {
   constructor(projectPath) {
     this.projectPath = projectPath;
     this.gitPath = path.join(projectPath, '.git');
+    this.indexLockPath = path.join(this.gitPath, 'index.lock');
   }
 
   /**
@@ -126,8 +127,12 @@ node_modules/
    */
   async commit(message, authorName = 'WebIDE User', authorEmail = 'webide@example.com') {
     try {
+      await this.ensureIndexLock();
+
+      const commitMessage = typeof message === 'string' ? message : String(message ?? '');
+      const sanitizedMessage = commitMessage.replace(/"/g, '\\"');
       const { stdout } = await execAsync(
-        `git -c user.name="${authorName}" -c user.email="${authorEmail}" commit -m "${message}"`,
+        `git -c user.name="${authorName}" -c user.email="${authorEmail}" commit -m "${sanitizedMessage}"`,
         { cwd: this.projectPath }
       );
       
@@ -144,6 +149,29 @@ node_modules/
         return { success: false, message: 'No changes to commit' };
       }
       throw new Error(`Commit failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * index.lock の存在をチェックし、古いロックであれば削除
+   */
+  async ensureIndexLock(maxLockAgeMs = 2 * 60 * 1000) {
+    try {
+      const stats = await fs.stat(this.indexLockPath);
+      const ageMs = Date.now() - stats.mtimeMs;
+
+      if (ageMs > maxLockAgeMs) {
+        console.warn(`Stale git index.lock detected (age ${ageMs}ms). Removing...`);
+        await fs.unlink(this.indexLockPath);
+        return;
+      }
+
+      throw new Error('Git index.lock file exists. Another git process may be running.');
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        return; // No lock file
+      }
+      throw error;
     }
   }
 

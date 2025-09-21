@@ -6,7 +6,8 @@ import {
   FiArrowLeft, 
   FiSave,
   FiFolder,
-  FiGitBranch
+  FiGitBranch,
+  FiGitCommit
 } from 'react-icons/fi';
 import FileTree from '../components/FileTree';
 import CodeEditor from '../components/CodeEditor';
@@ -189,6 +190,7 @@ const IDEPage = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('files'); // 'files' or 'git'
+  const [committing, setCommitting] = useState(false);
 
   useEffect(() => {
     fetchProject();
@@ -291,8 +293,7 @@ const IDEPage = () => {
         await axios.post(`/api/filesystem/${projectId}/files`, {
           fileName: selectedFile.file_name,
           filePath: selectedFile.file_path,
-          content: selectedFile.content,
-          autoCommit: true
+          content: selectedFile.content
         });
       } else {
         // 新規ファイルの場合（通常このケースはないはず）
@@ -303,8 +304,7 @@ const IDEPage = () => {
         await axios.post(`/api/filesystem/${projectId}/files`, {
           fileName: selectedFile.file_name,
           filePath: parentPath,
-          content: selectedFile.content,
-          autoCommit: true
+          content: selectedFile.content
         });
       }
       
@@ -323,6 +323,36 @@ const IDEPage = () => {
         ...prev,
         content
       }));
+    }
+  };
+
+  const handleManualCommit = async () => {
+    if (!projectId || committing) return;
+
+    const message = window.prompt('コミットメッセージを入力してください');
+    if (message === null) {
+      return;
+    }
+
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage) {
+      alert('コミットメッセージを入力してください。');
+      return;
+    }
+
+    setCommitting(true);
+    try {
+      await axios.post(`/api/version-control/${projectId}/commit`, {
+        message: trimmedMessage
+      });
+
+      window.dispatchEvent(new Event('mindcode:gitUpdated'));
+      alert('コミットが完了しました。');
+    } catch (error) {
+      console.error('Manual commit error:', error);
+      alert('コミットに失敗しました: ' + (error.response?.data?.message || error.message));
+    } finally {
+      setCommitting(false);
     }
   };
 
@@ -349,15 +379,9 @@ const IDEPage = () => {
         </HeaderLeft>
         
         <HeaderRight>
-          <Button 
-            onClick={() => setActiveTab(activeTab === 'git' ? 'files' : 'git')}
-            style={{ 
-              background: 'linear-gradient(135deg, #007acc, #005a9e)',
-              marginRight: '0.5rem'
-            }}
-          >
-            <FiGitBranch size={14} />
-            Git
+          <Button onClick={handleManualCommit} disabled={committing}>
+            <FiGitCommit size={14} />
+            {committing ? 'コミット中...' : 'コミット'}
           </Button>
           <Button onClick={handleSave} disabled={!selectedFile || saving}>
             <FiSave size={14} />
