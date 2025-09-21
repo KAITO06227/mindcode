@@ -18,11 +18,8 @@ class GitManager {
    */
   async initRepository(userName = 'WebIDE User', userEmail = 'webide@example.com') {
     try {
-      console.log(`Initializing Git repository at: ${this.projectPath}`);
-      
       // 既に初期化済みかチェック
       if (await this.isInitialized()) {
-        console.log('Git repository already initialized, skipping...');
         return {
           success: true,
           message: 'Git repository already initialized',
@@ -33,7 +30,6 @@ class GitManager {
       // プロジェクトディレクトリの存在確認
       try {
         await fs.access(this.projectPath);
-        console.log('Project directory exists');
       } catch (error) {
         console.error('Project directory does not exist:', this.projectPath);
         throw new Error(`Project directory not found: ${this.projectPath}`);
@@ -42,12 +38,10 @@ class GitManager {
       // 既存の.gitディレクトリを完全に削除してクリーンアップ
       try {
         const { stdout: rmOutput } = await execAsync(`rm -rf "${this.gitPath}"`, { cwd: this.projectPath });
-        console.log('Cleaned up existing .git directory with rm -rf');
         
         // 削除完了まで少し待機
         await new Promise(resolve => setTimeout(resolve, 100));
       } catch (cleanupError) {
-        console.log('No existing .git directory to cleanup or rm failed, continuing...');
       }
 
       // .gitignoreファイルを作成
@@ -61,30 +55,20 @@ node_modules/
 .backup/
 `;
       await fs.writeFile(path.join(this.projectPath, '.gitignore'), gitignore);
-      console.log('Created .gitignore file');
 
       // Git初期化（クリーンな状態から、テンプレート使用せず）
-      console.log('Running git init...');
       const initResult = await execAsync('git init --initial-branch=main --template=""', { cwd: this.projectPath });
-      console.log('Git init result:', initResult.stdout);
 
-      console.log('Configuring git user...');
       await execAsync(`git config user.name "${userName}"`, { cwd: this.projectPath });
       await execAsync(`git config user.email "${userEmail}"`, { cwd: this.projectPath });
-      console.log('Git user configured');
 
       // ファイルの存在確認
       const { stdout: files } = await execAsync('ls -la', { cwd: this.projectPath });
-      console.log('Files in project directory:', files);
       
       // 初期コミット
-      console.log('Adding files to git...');
       const addResult = await execAsync('git add .', { cwd: this.projectPath });
-      console.log('Git add result:', addResult.stdout);
 
-      console.log('Creating initial commit...');
       const commitResult = await execAsync('git commit -m "Initial commit: Project created via WebIDE"', { cwd: this.projectPath });
-      console.log('Git commit result:', commitResult.stdout);
 
       return {
         success: true,

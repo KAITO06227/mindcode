@@ -206,7 +206,6 @@ router.delete('/projects/:id', verifyToken, isTeacher, async (req, res) => {
     const projectPath = path.join(__dirname, '../../user_projects', project.user_id.toString(), projectId);
     try {
       await fs.rm(projectPath, { recursive: true, force: true });
-      console.log(`Admin deleted project directory: ${projectPath}`);
     } catch (error) {
       console.warn(`Could not delete project directory: ${error.message}`);
       // Continue with database deletion even if file deletion fails
@@ -222,7 +221,6 @@ router.delete('/projects/:id', verifyToken, isTeacher, async (req, res) => {
       return res.status(404).json({ message: 'Project not found' });
     }
 
-    console.log(`Admin ${req.user.id} deleted project ${projectId} (${project.name}) owned by user ${project.user_id}`);
     res.json({ 
       message: 'Project deleted successfully',
       projectId: projectId,

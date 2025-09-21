@@ -200,44 +200,25 @@ const IDEPage = () => {
 
   const fetchProject = async () => {
     try {
-      console.log('Fetching project with ID:', projectId);
       const response = await axios.get(`/api/projects/${projectId}`);
-      console.log('Project fetched successfully:', response.data);
       setProject(response.data);
       
       // Start Claude Code when project is loaded
       try {
-        console.log('Starting Claude Code for project:', projectId);
-        const claudeResponse = await axios.post(`/api/claude/start/${projectId}`);
-        console.log('Claude Code response:', claudeResponse.data);
-        if (claudeResponse.data.success) {
-          console.log('✓ Claude Code started');
-        }
+        await axios.post(`/api/claude/start/${projectId}`);
       } catch (claudeError) {
-        console.error('Failed to start Claude Code:', claudeError);
-        console.error('Error details:', claudeError.response?.data);
         // Continue even if Claude fails to start
       }
     } catch (error) {
-      console.error('Error fetching project:', error);
-      console.error('Error response:', error.response);
-      console.error('Error status:', error.response?.status);
-      console.error('Error data:', error.response?.data);
       if (error.response?.status === 404) {
-        console.log('Project not found, navigating to dashboard');
         navigate('/');
-      } else if (error.response?.status === 401) {
-        console.log('Unauthorized access, user may need to login');
-        // Don't navigate away on auth error, let AuthContext handle it
       }
     }
   };
 
   const fetchFileTree = async () => {
     try {
-      console.log('Fetching file tree for project ID:', projectId);
       const response = await axios.get(`/api/filesystem/${projectId}/tree`);
-      console.log('File tree fetched successfully:', response.data);
       setFileTree(response.data);
       
       // 現在選択中のファイルがある場合は、そのファイルの内容を再読み込み
@@ -245,9 +226,8 @@ const IDEPage = () => {
         try {
           const fileResponse = await axios.get(`/api/filesystem/${projectId}/files/${selectedFile.id}`);
           setSelectedFile(fileResponse.data);
-          console.log('Current file reloaded after tree update');
         } catch (fileError) {
-          console.error('Error reloading current file:', fileError);
+          // ignore
         }
       }
       
@@ -255,11 +235,6 @@ const IDEPage = () => {
       if (!selectedFile && response.data.index && response.data.index.html) {
         setSelectedFile(response.data['index.html']);
       }
-    } catch (error) {
-      console.error('Error fetching file tree:', error);
-      console.error('File tree error response:', error.response);
-      console.error('File tree error status:', error.response?.status);
-      console.error('File tree error data:', error.response?.data);
     } finally {
       setLoading(false);
     }
@@ -281,13 +256,6 @@ const IDEPage = () => {
     
     setSaving(true);
     try {
-      console.log('Saving file:', {
-        fileId: selectedFile.id,
-        fileName: selectedFile.file_name,
-        filePath: selectedFile.file_path,
-        content: selectedFile.content
-      });
-      
       if (selectedFile.id) {
         // 既存ファイルの場合は、file_pathをそのまま使用
         await axios.post(`/api/filesystem/${projectId}/files`, {
@@ -310,7 +278,6 @@ const IDEPage = () => {
       
       return true; // Return success
     } catch (error) {
-      console.error('Error saving file:', error);
       throw error; // Re-throw for CodeEditor to handle
     } finally {
       setSaving(false);

@@ -102,10 +102,8 @@ const LoginPage = () => {
   }, []);
 
   const handleGoogleLogin = () => {
-    console.log('Google login button clicked');
-    setErrorMessage(''); // エラーメッセージをクリア
+    setErrorMessage('');
     const authUrl = 'http://localhost:3001/api/auth/google';
-    console.log('Redirecting to:', authUrl);
     window.location.href = authUrl;
   };
 

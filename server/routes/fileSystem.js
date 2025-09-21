@@ -99,8 +99,6 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
     } = req.body;
     const projectId = req.params.projectId;
     
-    console.log('File/Folder save request:', { filePath, fileName, contentLength: content.length, isFolder });
-    
     // Verify project ownership
     const [projects] = await db.execute(
       'SELECT * FROM projects WHERE id = ? AND user_id = ?',
@@ -129,12 +127,8 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
     const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
     const fullFilePath = path.join(projectPath, relativeFilePath);
 
-    console.log('Paths:', { projectPath, relativeFilePath, fullFilePath, isFolder });
-
     if (isFolder) {
       await fs.mkdir(fullFilePath, { recursive: true });
-      console.log('Folder created successfully:', fullFilePath);
-
       const fileSize = 0;
       const checksum = '';
       const fileType = 'folder';
@@ -184,8 +178,6 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
     await fs.mkdir(parentDir, { recursive: true });
 
     await fs.writeFile(fullFilePath, content);
-    console.log('File written successfully:', fullFilePath);
-
     const [existingFiles] = await db.execute(
       'SELECT * FROM project_files WHERE project_id = ? AND file_path = ?',
       [projectId, relativeFilePath]
@@ -373,7 +365,6 @@ router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
         [projectId, req.user.id, `${file.file_path}/%`, file.file_path]
       );
       filesToDelete = childFiles;
-      console.log(`Found ${childFiles.length} files/folders to delete in folder ${file.file_path}`);
     }
 
     // Delete from filesystem
@@ -856,8 +847,6 @@ router.post('/:projectId/sync', verifyToken, async (req, res) => {
 
     const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
     
-    console.log('Starting filesystem sync for project:', projectId);
-    console.log('Project path:', projectPath);
     
     // Get existing files from database
     const [existingFiles] = await db.execute(
@@ -922,7 +911,6 @@ router.post('/:projectId/sync', verifyToken, async (req, res) => {
                   id: folderId
                 });
                 
-                console.log('Created folder in DB:', relativeFilePath);
               } catch (error) {
                 syncResult.errors.push({
                   path: relativeFilePath,
@@ -973,7 +961,6 @@ router.post('/:projectId/sync', verifyToken, async (req, res) => {
                   size: fileSize
                 });
                 
-                console.log('Created file in DB:', relativeFilePath);
                 
               } else if (existingChecksum !== checksum) {
                 // Update existing file
@@ -1014,7 +1001,6 @@ router.post('/:projectId/sync', verifyToken, async (req, res) => {
                     size: fileSize
                   });
                   
-                  console.log('Updated file in DB:', relativeFilePath);
                 }
               }
               
@@ -1045,7 +1031,6 @@ router.post('/:projectId/sync', verifyToken, async (req, res) => {
       });
     }
 
-    console.log('Filesystem sync completed:', syncResult);
 
     if (req.user?.id) {
       emitFileTreeUpdate(req.user.id, projectId, {

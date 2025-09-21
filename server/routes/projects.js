@@ -85,26 +85,16 @@ console.log('Welcome to ${name}!');`;
 
     // Write files to disk
     try {
-      console.log('Project path:', projectPath);
-      
-      // Ensure project directory exists
       await fs.mkdir(projectPath, { recursive: true });
-      console.log('Project directory created/verified');
-      
+
       // Create initial files
       await fs.writeFile(path.join(projectPath, 'index.html'), indexHtml);
-      console.log('Created index.html');
-      
+
       await fs.writeFile(path.join(projectPath, 'style.css'), indexCss);
-      console.log('Created style.css');
       
       await fs.writeFile(path.join(projectPath, 'script.js'), indexJs);
-      console.log('Created script.js');
 
       await fs.writeFile(path.join(projectPath, 'CLAUDE.md'), claudeMd);
-      console.log('Created CLAUDE.md');
-
-      console.log('All files created successfully');
       
     } catch (fileError) {
       console.error('Error creating files:', fileError);
@@ -132,7 +122,6 @@ console.log('Welcome to ${name}!');`;
       // Clean up existing files for this project first (in case of retry)
       // file_versions will be deleted automatically due to CASCADE constraint
       await db.execute('DELETE FROM project_files WHERE project_id = ?', [projectId]);
-      console.log('Cleaned up existing project files from database');
 
       for (const file of initialFiles) {
         // Try new database structure first, fallback to old structure
@@ -160,17 +149,13 @@ console.log('Welcome to ${name}!');`;
             [fileId, fileSize, checksum, req.user.id]
           );
           
-          console.log(`Saved ${file.name} to database with new structure`);
         } catch (newStructureError) {
-          console.log(`New structure failed for ${file.name}, trying legacy structure:`, newStructureError.message);
           
           // Fallback to old database structure
           await db.execute(
             'INSERT INTO project_files (project_id, file_path, file_name, content, file_type) VALUES (?, ?, ?, ?, ?)',
             [projectId, file.name, file.name, file.content, file.type]
           );
-          
-          console.log(`Saved ${file.name} to database with legacy structure`);
         }
       }
     } catch (dbError) {
@@ -191,7 +176,6 @@ console.log('Welcome to ${name}!');`;
       const GitManager = require('../utils/gitManager');
       const gitManager = new GitManager(projectPath);
       
-      console.log('Initializing Git repository for new project...');
       await gitManager.initRepository(req.user.name, req.user.email);
       
       // データベースの git_repositories レコードを作成/更新
@@ -206,13 +190,11 @@ console.log('Welcome to ${name}!');`;
         [projectId, req.user.name, req.user.email]
       );
       
-      console.log('Git repository initialized successfully for project:', projectId);
     } catch (gitError) {
       console.error('Git initialization failed during project creation:', gitError);
       // Git初期化が失敗してもプロジェクト作成は成功とする
     }
     
-    console.log('Project creation completed successfully:', newProject[0]);
     res.status(201).json(newProject[0]);
   } catch (error) {
     console.error('Error in project creation:', error);
@@ -287,7 +269,6 @@ router.delete('/:id', verifyToken, async (req, res) => {
     const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
     try {
       await fs.rm(projectPath, { recursive: true, force: true });
-      console.log(`Deleted project directory: ${projectPath}`);
     } catch (error) {
       console.warn(`Could not delete project directory: ${error.message}`);
       // Continue with database deletion even if file deletion fails
@@ -303,7 +284,6 @@ router.delete('/:id', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found' });
     }
 
-    console.log(`Project ${projectId} deleted successfully by user ${req.user.id}`);
     res.json({ 
       message: 'Project deleted successfully',
       projectId: projectId,
