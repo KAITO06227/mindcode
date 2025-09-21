@@ -39,12 +39,6 @@ const UserInfo = styled.div`
   color: #ffffff;
 `;
 
-const Avatar = styled.img`
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-`;
-
 const Button = styled.button`
   display: flex;
   align-items: center;
@@ -267,7 +261,6 @@ const DashboardPage = () => {
         <Logo>MindCode</Logo>
         <UserSection>
           <UserInfo>
-            <Avatar src={user?.avatar_url} alt={user?.name} />
             <span>{user?.name}</span>
             <span style={{ color: '#888', fontSize: '0.75rem' }}>
               ({user?.role})
