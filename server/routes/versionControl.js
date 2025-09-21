@@ -414,54 +414,6 @@ router.get('/:projectId/branches', verifyToken, async (req, res) => {
   }
 });
 
-// POST /api/version-control/:projectId/branch - Create new branch
-router.post('/:projectId/branch', verifyToken, async (req, res) => {
-  try {
-    const { projectId } = req.params;
-    const { branchName } = req.body;
-
-    if (!branchName) {
-      return res.status(400).json({ message: 'branchName is required' });
-    }
-
-    // Verify project ownership
-    const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
-    );
-
-    if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
-    }
-
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
-    const gitManager = new GitManager(projectPath);
-
-    if (!await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository not initialized' });
-    }
-
-    const result = await gitManager.createBranch(branchName);
-
-    // Update current branch in database
-    await db.execute(`
-      UPDATE git_repositories 
-      SET current_branch = ?, updated_at = NOW()
-      WHERE project_id = ?`,
-      [branchName, projectId]
-    );
-
-    res.json(result);
-
-  } catch (error) {
-    console.error('Error creating branch:', error);
-    res.status(500).json({ 
-      message: 'Error creating branch',
-      error: error.message 
-    });
-  }
-});
-
 // POST /api/version-control/:projectId/checkout - Switch branch
 router.post('/:projectId/checkout', verifyToken, async (req, res) => {
   try {
@@ -546,6 +498,15 @@ router.post('/:projectId/restore', verifyToken, async (req, res) => {
     );
 
     const files = fileList.trim().split('\n').filter(file => file);
+    const commitFileSet = new Set(files);
+    const [existingRecords] = await db.execute(
+      'SELECT id, file_path, file_type FROM project_files WHERE project_id = ?',
+      [projectId]
+    );
+
+    const existingFileRecords = existingRecords.filter(record => record.file_type !== 'folder');
+    const existingFolderRecords = existingRecords.filter(record => record.file_type === 'folder');
+
     const restoredFiles = [];
 
     // Restore each file from the commit
@@ -593,6 +554,62 @@ router.post('/:projectId/restore', verifyToken, async (req, res) => {
         }
       } catch (fileError) {
         console.error(`Failed to restore file ${filePath}:`, fileError);
+      }
+    }
+
+    // Remove files that are not part of the target commit
+    for (const record of existingFileRecords) {
+      if (!commitFileSet.has(record.file_path)) {
+        const absolutePath = path.join(projectPath, record.file_path);
+        try {
+          await fs.rm(absolutePath, { force: true });
+        } catch (removeError) {
+          console.warn(`Failed to remove file ${absolutePath}:`, removeError.message);
+        }
+        await db.execute('DELETE FROM project_files WHERE id = ?', [record.id]);
+      }
+    }
+
+    // Ensure folder records exist for all directories in the commit
+    const folderPaths = new Set();
+    for (const filePath of files) {
+      let currentDir = path.posix.dirname(filePath);
+      while (currentDir && currentDir !== '.' && !folderPaths.has(currentDir)) {
+        folderPaths.add(currentDir);
+        const parent = path.posix.dirname(currentDir);
+        if (parent === currentDir) {
+          break;
+        }
+        currentDir = parent;
+      }
+    }
+
+    const existingFolderMap = new Map(existingFolderRecords.map(record => [record.file_path, record]));
+
+    for (const folderPath of folderPaths) {
+      if (!existingFolderMap.has(folderPath)) {
+        await db.execute(`
+          INSERT INTO project_files 
+          (project_id, file_path, file_name, content, file_type, file_size, 
+           permissions, checksum, is_binary, created_by, updated_by) 
+          VALUES (?, ?, ?, '', 'folder', 0, 'rwxr-xr-x', '', false, ?, ?)
+        `,
+        [projectId, folderPath, path.posix.basename(folderPath), req.user.id, req.user.id]);
+      }
+    }
+
+    // Remove folders that no longer exist in the target commit
+    const foldersToRemove = existingFolderRecords
+      .filter(record => record.file_path && !folderPaths.has(record.file_path))
+      .sort((a, b) => b.file_path.length - a.file_path.length);
+
+    for (const folderRecord of foldersToRemove) {
+      await db.execute('DELETE FROM project_files WHERE id = ?', [folderRecord.id]);
+      const absoluteFolderPath = path.join(projectPath, folderRecord.file_path);
+      try {
+        await fs.rm(absoluteFolderPath, { recursive: true, force: true });
+      } catch (removeFolderError) {
+        console.warn(`Failed to remove folder ${absoluteFolderPath}:`, removeFolderError.message);
       }
     }
 

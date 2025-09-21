@@ -8,6 +8,7 @@ const GitManager = require('../utils/gitManager');
 const crypto = require('crypto');
 
 const router = express.Router();
+const { emitFileTreeUpdate } = require('../sockets/fileTreeEvents');
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -159,6 +160,10 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
 
       await logFileAccess(folderId, req.user.id, 'write', req);
 
+      if (req.user?.id) {
+        emitFileTreeUpdate(req.user.id, projectId, { action: 'create-folder', path: relativeFilePath });
+      }
+
       return res.status(201).json({
         id: folderId,
         filePath: relativeFilePath,
@@ -234,6 +239,13 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
     }
 
     await logFileAccess(fileId, req.user.id, 'write', req);
+
+    if (req.user?.id) {
+      emitFileTreeUpdate(req.user.id, projectId, {
+        action: isUpdate ? 'update-file' : 'create-file',
+        path: relativeFilePath
+      });
+    }
 
     res.status(isUpdate ? 200 : 201).json({
       id: fileId,
@@ -406,6 +418,14 @@ router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
       await db.execute('DELETE FROM project_files WHERE id = ?', [fileToDelete.id]);
     }
 
+    if (req.user?.id) {
+      emitFileTreeUpdate(req.user.id, projectId, {
+        action: 'delete',
+        target: file.file_path,
+        deletedCount: filesToDelete.length
+      });
+    }
+
     res.json({
       message: file.file_type === 'folder' 
         ? `Folder and ${filesToDelete.length} items deleted successfully`
@@ -420,6 +440,139 @@ router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
     res.status(500).json({ 
       message: 'Error deleting file',
       error: error.message 
+    });
+  }
+});
+
+// POST /api/filesystem/:projectId/move - Move file or folder to another directory
+router.post('/:projectId/move', verifyToken, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { sourcePath, destinationPath = '' } = req.body;
+
+    if (!sourcePath || typeof sourcePath !== 'string') {
+      return res.status(400).json({ message: 'sourcePath is required' });
+    }
+
+    if (typeof destinationPath !== 'string') {
+      return res.status(400).json({ message: 'destinationPath must be a string' });
+    }
+
+    const [projects] = await db.execute(
+      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
+      [projectId, req.user.id]
+    );
+
+    if (projects.length === 0) {
+      return res.status(404).json({ message: 'Project not found or access denied' });
+    }
+
+    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const sourceRelativePath = sourcePath.replace(/^\/+/, '');
+    const destinationFolderPath = destinationPath.replace(/^\/+/, '').replace(/\/+$/, '');
+
+    if (!sourceRelativePath) {
+      return res.status(400).json({ message: 'Invalid sourcePath' });
+    }
+
+    if (destinationFolderPath && (destinationFolderPath === sourceRelativePath || destinationFolderPath.startsWith(`${sourceRelativePath}/`))) {
+      return res.status(400).json({ message: 'Cannot move item into itself or its descendant' });
+    }
+
+    const [sources] = await db.execute(
+      'SELECT * FROM project_files WHERE project_id = ? AND file_path = ?',
+      [projectId, sourceRelativePath]
+    );
+
+    if (sources.length === 0) {
+      return res.status(404).json({ message: 'Source item not found' });
+    }
+
+    const sourceItem = sources[0];
+    const sourceName = path.posix.basename(sourceRelativePath);
+    const currentParent = sourceRelativePath.includes('/')
+      ? sourceRelativePath.slice(0, sourceRelativePath.lastIndexOf('/'))
+      : '';
+
+    if (currentParent === destinationFolderPath) {
+      return res.json({
+        success: true,
+        message: 'Item already in target location',
+        newPath: sourceRelativePath
+      });
+    }
+
+    const newRelativePath = destinationFolderPath
+      ? path.posix.join(destinationFolderPath, sourceName)
+      : sourceName;
+
+    if (newRelativePath === sourceRelativePath) {
+      return res.json({
+        success: true,
+        message: 'Item already in target location',
+        newPath: sourceRelativePath
+      });
+    }
+
+    const newFullPath = path.join(projectPath, newRelativePath);
+    const sourceFullPath = path.join(projectPath, sourceRelativePath);
+
+    try {
+      await fs.access(newFullPath);
+      return res.status(409).json({ message: 'An item with the same name already exists in the destination' });
+    } catch {
+      // Destination free, continue
+    }
+
+    await fs.mkdir(path.dirname(newFullPath), { recursive: true });
+    await fs.rename(sourceFullPath, newFullPath);
+
+    if (sourceItem.file_type === 'folder') {
+      const [descendants] = await db.execute(
+        'SELECT id, file_path FROM project_files WHERE project_id = ? AND (file_path = ? OR file_path LIKE ?)',
+        [projectId, sourceRelativePath, `${sourceRelativePath}/%`]
+      );
+
+      for (const row of descendants) {
+        let suffix = '';
+        if (row.file_path.length > sourceRelativePath.length) {
+          suffix = row.file_path.slice(sourceRelativePath.length);
+          if (suffix.startsWith('/')) {
+            suffix = suffix.slice(1);
+          }
+        }
+
+        const updatedPath = suffix ? `${newRelativePath}/${suffix}` : newRelativePath;
+        await db.execute(
+          'UPDATE project_files SET file_path = ?, updated_at = NOW() WHERE id = ?',
+          [updatedPath, row.id]
+        );
+      }
+    } else {
+      await db.execute(
+        'UPDATE project_files SET file_path = ?, updated_at = NOW() WHERE id = ?',
+        [newRelativePath, sourceItem.id]
+      );
+    }
+
+    emitFileTreeUpdate(req.user.id, projectId, {
+      action: 'move',
+      from: sourceRelativePath,
+      to: newRelativePath,
+      isFolder: sourceItem.file_type === 'folder'
+    });
+
+    res.json({
+      success: true,
+      message: 'Item moved successfully',
+      newPath: newRelativePath,
+      isFolder: sourceItem.file_type === 'folder'
+    });
+  } catch (error) {
+    console.error('Error moving item:', error);
+    res.status(500).json({
+      message: 'Error moving item',
+      error: error.message
     });
   }
 });
@@ -580,6 +733,13 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
       }
     }
 
+    if (req.user?.id) {
+      emitFileTreeUpdate(req.user.id, projectId, {
+        action: 'upload',
+        uploadedCount: uploadedFiles.length
+      });
+    }
+
     res.json({ 
       files: uploadedFiles
     });
@@ -654,6 +814,14 @@ router.patch('/:projectId/files/:fileId/rename', verifyToken, async (req, res) =
 
     // Log access
     await logFileAccess(fileId, req.user.id, 'rename', req);
+
+    if (req.user?.id) {
+      emitFileTreeUpdate(req.user.id, projectId, {
+        action: 'rename',
+        oldPath: file.file_path,
+        newPath: newFilePath
+      });
+    }
 
     res.json({
       message: 'File renamed successfully',
@@ -878,6 +1046,13 @@ router.post('/:projectId/sync', verifyToken, async (req, res) => {
     }
 
     console.log('Filesystem sync completed:', syncResult);
+
+    if (req.user?.id) {
+      emitFileTreeUpdate(req.user.id, projectId, {
+        action: 'sync',
+        result: syncResult
+      });
+    }
 
     res.json({
       message: 'Filesystem sync completed',

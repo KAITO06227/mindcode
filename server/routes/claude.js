@@ -3,6 +3,7 @@ const { verifyToken } = require('../middleware/auth');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
+const db = require('../database/connection');
 
 const router = express.Router();
 
@@ -135,6 +136,26 @@ router.post('/send/:projectId', verifyToken, async (req, res) => {
     const { message } = req.body;
     const processKey = `${req.user.id}_${req.params.projectId}`;
 
+    if (!message || !message.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Message is required'
+      });
+    }
+
+    // Verify project ownership before forwarding to Claude
+    const [projects] = await db.execute(
+      'SELECT id FROM projects WHERE id = ? AND user_id = ?',
+      [req.params.projectId, req.user.id]
+    );
+
+    if (projects.length === 0) {
+      return res.status(403).json({
+        success: false,
+        message: 'Project not found or access denied'
+      });
+    }
+
     console.log(`Sending message to Claude: ${message}`);
 
     // Get Claude process
@@ -145,6 +166,16 @@ router.post('/send/:projectId', verifyToken, async (req, res) => {
         success: false,
         message: 'Claude Code not running'
       });
+    }
+
+    // Log prompt before sending
+    try {
+      await db.execute(
+        'INSERT INTO claude_prompt_logs (project_id, user_id, prompt) VALUES (?, ?, ?)',
+        [req.params.projectId, req.user.id, message.trim()]
+      );
+    } catch (logError) {
+      console.warn('Failed to log Claude prompt:', logError.message);
     }
 
     // Send message

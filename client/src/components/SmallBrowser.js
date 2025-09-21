@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
-import axios from 'axios';
 import {
   FiArrowLeft,
   FiArrowRight,
@@ -114,225 +113,157 @@ const ErrorTitle = styled.h3`
   margin-bottom: 0.5rem;
 `;
 
+const getApiOrigin = () => {
+  const envOrigin = process.env.REACT_APP_API_ORIGIN || process.env.REACT_APP_BACKEND_URL;
+  if (envOrigin) {
+    return envOrigin;
+  }
+
+  if (window.location.origin.includes('3000')) {
+    return window.location.origin.replace('3000', '3001');
+  }
+
+  return window.location.origin;
+};
+
+const arraysEqual = (a, b) => {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((value, index) => value === b[index]);
+};
+
 const SmallBrowser = ({ projectId }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [navigationHistory] = useState(['']);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [htmlContent, setHtmlContent] = useState('');
+  const [iframeSrc, setIframeSrc] = useState('');
+  const [navigationHistory, setNavigationHistory] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(-1);
   const iframeRef = useRef(null);
 
-  // Helper function to find a file in the tree
-  const findFile = useCallback((tree, fileName) => {
-    for (const key in tree) {
-      const file = tree[key];
-      if (file && typeof file === 'object') {
-        const name = file.name || file.file_name || key;
-        if (name === fileName) {
-          return file;
-        }
-        // If it's a directory, search recursively
-        if (file.children && typeof file.children === 'object') {
-          const found = findFile(file.children, fileName);
-          if (found) return found;
-        }
-      }
+  const buildPreviewUrl = useCallback(() => {
+    if (!projectId) {
+      return '';
     }
-    return null;
-  }, []);
 
-  // Helper function to find files by extension
-  const findFilesByExtension = useCallback((tree, extension) => {
-    const files = [];
-    for (const key in tree) {
-      const file = tree[key];
-      if (file && typeof file === 'object') {
-        const name = file.name || file.file_name || key;
-        if (name && name.endsWith(`.${extension}`)) {
-          files.push(file);
-        }
-        // If it's a directory, search recursively
-        if (file.children && typeof file.children === 'object') {
-          files.push(...findFilesByExtension(file.children, extension));
-        }
-      }
+    const baseOrigin = getApiOrigin();
+    const url = new URL(`/api/projects/${projectId}/live`, baseOrigin);
+    url.searchParams.set('ts', Date.now());
+    return url.toString();
+  }, [projectId]);
+
+  const loadProject = useCallback(() => {
+    if (!projectId) {
+      setError('プロジェクトが選択されていません');
+      setIframeSrc('');
+      setNavigationHistory([]);
+      setCurrentIndex(-1);
+      return;
     }
-    return files;
-  }, []);
 
-  const loadProject = useCallback(async () => {
-    if (!projectId) return;
-    
-    console.log('SmallBrowser: loadProject called for projectId:', projectId);
-    setLoading(true);
     setError(null);
-
-    try {
-      // Get the project's HTML content
-      const response = await axios.get(`/api/files/tree/${projectId}`);
-      const fileTree = response.data;
-
-      // Look for index.html
-      const indexFile = findFile(fileTree, 'index.html');
-      
-      if (indexFile) {
-        const fileResponse = await axios.get(`/api/files/${projectId}/${indexFile.id}`);
-        let htmlContent = fileResponse.data.content;
-
-        // Get CSS and JS files to embed
-        const cssFiles = findFilesByExtension(fileTree, 'css');
-        const jsFiles = findFilesByExtension(fileTree, 'js');
-
-        // Embed CSS files
-        for (const cssFile of cssFiles) {
-          try {
-            const cssResponse = await axios.get(`/api/files/${projectId}/${cssFile.id}`);
-            const cssContent = cssResponse.data.content;
-            
-            // Replace various CSS link patterns
-            const fileName = cssFile.name || cssFile.file_name;
-            
-            // Simple string replacements first
-            const exactPatterns = [
-              `<link rel="stylesheet" href="${fileName}">`,
-              `<link rel="stylesheet" href="${fileName}" />`,
-              `<link href="${fileName}" rel="stylesheet">`,
-              `<link href="${fileName}" rel="stylesheet" />`,
-              `<link rel="stylesheet" href="./${fileName}">`,
-              `<link rel="stylesheet" href="./${fileName}" />`
-            ];
-            
-            for (const pattern of exactPatterns) {
-              const regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-              htmlContent = htmlContent.replace(regex, `<style>\n${cssContent}\n</style>`);
-            }
-            
-            console.log(`Embedded CSS file: ${fileName}`);
-          } catch (error) {
-            console.warn(`Failed to embed CSS file ${cssFile.name}:`, error);
-          }
-        }
-
-        // Embed JS files
-        for (const jsFile of jsFiles) {
-          try {
-            const jsResponse = await axios.get(`/api/files/${projectId}/${jsFile.id}`);
-            const jsContent = jsResponse.data.content;
-            
-            // Replace various script src patterns
-            const fileName = jsFile.name || jsFile.file_name;
-            
-            const exactPatterns = [
-              `<script src="${fileName}"></script>`,
-              `<script src="${fileName}"></script>`,
-              `<script src="./${fileName}"></script>`,
-              `<script type="text/javascript" src="${fileName}"></script>`,
-              `<script type="text/javascript" src="./${fileName}"></script>`
-            ];
-            
-            for (const pattern of exactPatterns) {
-              const regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-              htmlContent = htmlContent.replace(regex, `<script>\n${jsContent}\n</script>`);
-            }
-            
-            console.log(`Embedded JS file: ${fileName}`);
-          } catch (error) {
-            console.warn(`Failed to embed JS file ${jsFile.name}:`, error);
-          }
-        }
-
-        // Clean up any remaining external references that couldn't be embedded
-        // Remove broken CSS links
-        htmlContent = htmlContent.replace(/<link[^>]*href=['"'][^'"]*\.css['"][^>]*>/gi, 
-          '<!-- CSS file not found and removed -->');
-        
-        // Remove broken script sources  
-        htmlContent = htmlContent.replace(/<script[^>]*src=['"'][^'"]*\.js['"][^>]*><\/script>/gi, 
-          '<!-- JS file not found and removed -->');
-
-        console.log('SmallBrowser: Setting HTML content:', htmlContent.length, 'characters');
-        setHtmlContent(htmlContent);
-        
-        // URL for new tab functionality could be stored here if needed
-      } else {
-        setError('No index.html file found in project');
-      }
-    } catch (error) {
-      console.error('Error loading project:', error);
-      setError('Failed to load project preview');
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId, findFile, findFilesByExtension]);
+    setLoading(true);
+    const url = buildPreviewUrl();
+    setIframeSrc(url);
+    setNavigationHistory([url]);
+    setCurrentIndex(0);
+  }, [projectId, buildPreviewUrl]);
 
   useEffect(() => {
     loadProject();
   }, [loadProject]);
 
-  // Update iframe when htmlContent changes
-  useEffect(() => {
-    if (htmlContent) {
-      updateIframe(htmlContent);
-    }
-  }, [htmlContent]);
+  const handleIframeLoad = useCallback(() => {
+    setLoading(false);
 
+    try {
+      const iframeWindow = iframeRef.current?.contentWindow;
+      if (!iframeWindow) {
+        return;
+      }
 
-  const updateIframe = (content) => {
-    if (iframeRef.current && content) {
-      const iframe = iframeRef.current;
-      
-      console.log('SmallBrowser: updateIframe called with content length:', content.length);
-      
-      // Always update - remove the content comparison that might be causing issues
-      console.log('SmallBrowser: Updating iframe with fresh content');
-      
-      // Clear existing content first
-      iframe.removeAttribute('srcdoc');
-      
-      // Add timestamp to force refresh
-      const timestampedContent = content.replace(
-        '<html',
-        `<html data-timestamp="${Date.now()}"`
-      );
-      
-      // Set new content
-      iframe.setAttribute('srcdoc', timestampedContent);
-      
-      console.log('SmallBrowser: Iframe updated successfully');
-    } else {
-      console.log('SmallBrowser: updateIframe - no iframe or content');
+      const url = iframeWindow.location.href;
+      if (!url) {
+        return;
+      }
+
+      if (
+        currentIndex >= 0 &&
+        currentIndex < navigationHistory.length &&
+        navigationHistory[currentIndex] === url
+      ) {
+        return;
+      }
+
+      const baseLength = currentIndex >= 0 ? currentIndex + 1 : 0;
+      const baseHistory = navigationHistory.slice(0, baseLength);
+      let updatedHistory = baseHistory;
+
+      if (updatedHistory.length === 0 || updatedHistory[updatedHistory.length - 1] !== url) {
+        updatedHistory = [...updatedHistory, url];
+      }
+
+      if (!arraysEqual(updatedHistory, navigationHistory)) {
+        setNavigationHistory(updatedHistory);
+      }
+      setCurrentIndex(updatedHistory.length - 1);
+    } catch (iframeError) {
+      console.warn('SmallBrowser: Unable to access iframe location', iframeError);
     }
+  }, [currentIndex, navigationHistory]);
+
+  const handleIframeError = () => {
+    setLoading(false);
+    setError('プレビューの読み込みに失敗しました');
   };
+
+  const navigateTo = useCallback((url, newIndex) => {
+    if (!url) {
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    setIframeSrc(url);
+    setCurrentIndex(newIndex);
+  }, []);
 
   const handleBack = () => {
     if (currentIndex > 0) {
-      setCurrentIndex(currentIndex - 1);
-      // In a real implementation, this would navigate back
+      const targetIndex = currentIndex - 1;
+      navigateTo(navigationHistory[targetIndex], targetIndex);
     }
   };
 
   const handleForward = () => {
     if (currentIndex < navigationHistory.length - 1) {
-      setCurrentIndex(currentIndex + 1);
-      // In a real implementation, this would navigate forward
+      const targetIndex = currentIndex + 1;
+      navigateTo(navigationHistory[targetIndex], targetIndex);
     }
   };
 
   const handleRefresh = () => {
-    console.log('SmallBrowser: Manual refresh triggered');
-    console.log('SmallBrowser: Current htmlContent:', htmlContent ? htmlContent.length : 'none');
-    
-    // Kenya.html style: Reload project to get fresh content and update display
-    loadProject();
+    if (currentIndex >= 0 && navigationHistory[currentIndex]) {
+      const url = new URL(navigationHistory[currentIndex]);
+      url.searchParams.set('ts', Date.now());
+      const refreshed = url.toString();
+
+      const updatedHistory = [...navigationHistory];
+      updatedHistory[currentIndex] = refreshed;
+
+      setNavigationHistory(updatedHistory);
+      navigateTo(refreshed, currentIndex);
+    } else {
+      loadProject();
+    }
   };
 
   const handleOpenInNewTab = () => {
-    // Use direct server URL to bypass React Router
-    if (projectId) {
-      const previewUrl = `http://localhost:3001/api/projects/${projectId}/preview`;
-      window.open(previewUrl, '_blank');
-    } else {
-      console.warn('SmallBrowser: No project ID available');
+    const url =
+      (currentIndex >= 0 && navigationHistory[currentIndex]) || buildPreviewUrl();
+
+    if (url) {
+      window.open(url, '_blank', 'noopener');
     }
   };
 
@@ -344,7 +275,7 @@ const SmallBrowser = ({ projectId }) => {
     return (
       <BrowserContainer>
         <BrowserToolbar>
-          <ToolbarButton onClick={handleRunProject}>
+          <ToolbarButton onClick={handleRunProject} title="Run">
             <FiPlay size={14} />
           </ToolbarButton>
           <BrowserLabel>スモールブラウザ</BrowserLabel>
@@ -352,7 +283,11 @@ const SmallBrowser = ({ projectId }) => {
         <ErrorMessage>
           <ErrorTitle>Preview Error</ErrorTitle>
           <p>{error}</p>
-          <ToolbarButton onClick={loadProject} style={{ marginTop: '1rem', width: 'auto', padding: '0.5rem 1rem' }}>
+          <ToolbarButton
+            onClick={loadProject}
+            style={{ marginTop: '1rem', width: 'auto', padding: '0.5rem 1rem' }}
+            title="Retry"
+          >
             <FiRefreshCw size={14} style={{ marginRight: '0.5rem' }} />
             Retry
           </ToolbarButton>
@@ -366,33 +301,34 @@ const SmallBrowser = ({ projectId }) => {
       <BrowserToolbar>
         <ToolbarButton
           onClick={handleBack}
-          disabled={currentIndex === 0}
+          disabled={currentIndex <= 0}
           title="Back"
         >
           <FiArrowLeft size={14} />
         </ToolbarButton>
-        
+
         <ToolbarButton
           onClick={handleForward}
-          disabled={currentIndex >= navigationHistory.length - 1}
+          disabled={currentIndex < 0 || currentIndex >= navigationHistory.length - 1}
           title="Forward"
         >
           <FiArrowRight size={14} />
         </ToolbarButton>
-        
+
         <ToolbarButton
           onClick={handleRefresh}
           title="Refresh"
+          disabled={!iframeSrc}
         >
           <FiRefreshCw size={14} />
         </ToolbarButton>
-        
+
         <BrowserLabel>スモールブラウザ</BrowserLabel>
-        
+
         <ToolbarButton
           onClick={handleOpenInNewTab}
           title="Open in new tab"
-          disabled={!htmlContent}
+          disabled={!iframeSrc}
         >
           <FiExternalLink size={14} />
         </ToolbarButton>
@@ -404,12 +340,14 @@ const SmallBrowser = ({ projectId }) => {
             <LoadingSpinner />
           </LoadingOverlay>
         )}
-        
+
         <IFrame
           ref={iframeRef}
           title="Project Preview"
-          sandbox="allow-scripts allow-forms allow-same-origin"
-          srcDoc={htmlContent}
+          sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+          src={iframeSrc}
+          onLoad={handleIframeLoad}
+          onError={handleIframeError}
         />
       </IframeContainer>
     </BrowserContainer>

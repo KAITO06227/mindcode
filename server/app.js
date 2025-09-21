@@ -41,6 +41,7 @@ const claudeRoutes = require('./routes/claude');
 const adminRoutes = require('./routes/admin');
 const fileSystemRoutes = require('./routes/fileSystem');
 const versionControlRoutes = require('./routes/versionControl');
+const { initFileTreeEvents } = require('./sockets/fileTreeEvents');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
@@ -53,6 +54,7 @@ app.use('/api/version-control', versionControlRoutes); // New Git API
 // Initialize Socket.IO for terminal sessions (using fallback without node-pty)
 const claudeSocket = require('./sockets/claudeSocketSimple');
 claudeSocket(io);
+initFileTreeEvents(io);
 
 // Serve React app for all other routes (only in production)
 if (process.env.NODE_ENV === 'production') {

@@ -4,6 +4,7 @@ const db = require('../database/connection');
 const fs = require('fs').promises;
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { serveProjectAsset } = require('../utils/projectPreviewUtils');
 const router = express.Router();
 
 // Get user projects
@@ -64,6 +65,24 @@ h1 {
     const indexJs = `// Your JavaScript code here
 console.log('Welcome to ${name}!');`;
 
+    const claudeMd = [
+      `# ${name}`,
+      '',
+      'このプロジェクトは MindCode で作成されました。Claude Code に関する注意点:',
+      '',
+      '- Claude CLI を利用する場合は、ターミナルで `claude` コマンドを実行します。',
+      '- 重要な変更前後に自動コミットが実行されます。',
+      '- Claude に送信するプロンプトは教育目的で保存される可能性があります。',
+      '',
+      '## フォルダ構成',
+      '',
+      '- `index.html`',
+      '- `style.css`',
+      '- `script.js`',
+      '',
+      '必要に応じて内容を更新してください。'
+    ].join('\n');
+
     // Write files to disk
     try {
       console.log('Project path:', projectPath);
@@ -81,7 +100,10 @@ console.log('Welcome to ${name}!');`;
       
       await fs.writeFile(path.join(projectPath, 'script.js'), indexJs);
       console.log('Created script.js');
-      
+
+      await fs.writeFile(path.join(projectPath, 'CLAUDE.md'), claudeMd);
+      console.log('Created CLAUDE.md');
+
       console.log('All files created successfully');
       
     } catch (fileError) {
@@ -102,7 +124,8 @@ console.log('Welcome to ${name}!');`;
     const initialFiles = [
       { name: 'index.html', content: indexHtml, type: 'html' },
       { name: 'style.css', content: indexCss, type: 'css' },
-      { name: 'script.js', content: indexJs, type: 'javascript' }
+      { name: 'script.js', content: indexJs, type: 'javascript' },
+      { name: 'CLAUDE.md', content: claudeMd, type: 'markdown' }
     ];
 
     try {
@@ -294,6 +317,45 @@ router.delete('/:id', verifyToken, async (req, res) => {
     });
   }
 });
+
+const handleLiveAssetRequest = async (req, res) => {
+  try {
+    const projectId = req.params.projectId;
+    const requestedPath = req.params[0] || 'index.html';
+
+    const [projects] = await db.execute(
+      'SELECT p.*, u.id as user_id FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
+    );
+
+    if (projects.length === 0) {
+      return res.status(404).send('<h1>Project not found</h1>');
+    }
+
+    const projectRoot = path.join(
+      __dirname,
+      '../../user_projects',
+      projects[0].user_id.toString(),
+      projectId
+    );
+
+    await serveProjectAsset({
+      projectRoot,
+      requestedPath,
+      projectId,
+      token: req.query.token,
+      res,
+      db,
+      baseHref: `${req.baseUrl}/${projectId}/live/`
+    });
+  } catch (error) {
+    console.error('Error serving live preview asset:', error);
+    res.status(500).send('<h1>Error loading project</h1>');
+  }
+};
+
+router.get('/:projectId/live', handleLiveAssetRequest);
+router.get('/:projectId/live/*', handleLiveAssetRequest);
 
 // Public shared preview (no authentication required)
 router.get('/:id/preview', async (req, res) => {

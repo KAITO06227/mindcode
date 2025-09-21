@@ -56,6 +56,8 @@ class GitManager {
 node_modules/
 *.log
 .env
+.bash_history
+.config/
 .backup/
 `;
       await fs.writeFile(path.join(this.projectPath, '.gitignore'), gitignore);

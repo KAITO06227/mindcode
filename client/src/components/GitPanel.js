@@ -216,12 +216,9 @@ const BranchInfo = styled.div`
 const GitPanel = ({ projectId, onRefresh }) => {
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
-  const [branches, setBranches] = useState([]);
   const [loading, setLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
-  const [newBranchName, setNewBranchName] = useState('');
   const [showCommitForm, setShowCommitForm] = useState(false);
-  const [showBranchForm, setShowBranchForm] = useState(false);
 
   // Gitデータの取得（初期化は行わない）
   const fetchGitData = useCallback(async () => {
@@ -234,12 +231,11 @@ const GitPanel = ({ projectId, onRefresh }) => {
       const [statusRes, historyRes, branchesRes] = await Promise.all([
         axios.get(`/api/version-control/${projectId}/status`).catch(() => ({ data: { initialized: false } })),
         axios.get(`/api/version-control/${projectId}/history?limit=10`).catch(() => ({ data: [] })),
-        axios.get(`/api/version-control/${projectId}/branches`).catch(() => ({ data: [] }))
+        Promise.resolve({ data: [] })
       ]);
       
       setStatus(statusRes.data);
       setHistory(historyRes.data || []);
-      setBranches(branchesRes.data || []);
       
     } catch (error) {
       console.error('Git data fetch error:', error);
@@ -273,32 +269,6 @@ const GitPanel = ({ projectId, onRefresh }) => {
     } catch (error) {
       console.error('Commit error:', error);
       alert('コミットエラー: ' + (error.response?.data?.message || error.message));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ブランチ作成
-  const handleCreateBranch = async () => {
-    if (!newBranchName.trim()) {
-      alert('ブランチ名を入力してください');
-      return;
-    }
-
-    try {
-      setLoading(true);
-      
-      await axios.post(`/api/version-control/${projectId}/branch`, {
-        branchName: newBranchName.trim()
-      });
-      
-      setNewBranchName('');
-      setShowBranchForm(false);
-      await fetchGitData();
-      
-    } catch (error) {
-      console.error('Branch creation error:', error);
-      alert('ブランチ作成エラー: ' + (error.response?.data?.message || error.message));
     } finally {
       setLoading(false);
     }
@@ -460,61 +430,7 @@ const GitPanel = ({ projectId, onRefresh }) => {
         )}
 
         {/* ブランチ管理 */}
-        <Section>
-          <SectionHeader
-            onClick={() => setShowBranchForm(!showBranchForm)}
-          >
-            {showBranchForm ? <FiChevronDown /> : <FiChevronRight />}
-            ブランチ ({branches.length})
-            <Button
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowBranchForm(!showBranchForm);
-              }}
-            >
-              <FiPlus />
-            </Button>
-          </SectionHeader>
-          
-          {showBranchForm && (
-            <>
-              <Input
-                value={newBranchName}
-                onChange={(e) => setNewBranchName(e.target.value)}
-                placeholder="新しいブランチ名..."
-              />
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                <Button $primary onClick={handleCreateBranch} disabled={loading}>
-                  作成
-                </Button>
-                <Button onClick={() => setShowBranchForm(false)}>
-                  キャンセル
-                </Button>
-              </div>
-            </>
-          )}
-
-          {/* ブランチ一覧 */}
-          <div style={{ marginTop: '0.5rem' }}>
-            {branches.map((branch) => (
-              <CommitItem
-                key={branch.name}
-                $isCurrent={branch.current}
-                onClick={() => !branch.current && handleSwitchBranch(branch.name)}
-                style={{ cursor: branch.current ? 'default' : 'pointer' }}
-              >
-                <CommitIcon $isCurrent={branch.current}>
-                  <FiGitBranch />
-                </CommitIcon>
-                <CommitDetails>
-                  <CommitMessage>
-                    {branch.name} {branch.current && '(現在)'}
-                  </CommitMessage>
-                </CommitDetails>
-              </CommitItem>
-            ))}
-          </div>
-        </Section>
+        {/* ブランチ機能を削除 */}
 
         {/* コミット履歴 */}
         <Section>

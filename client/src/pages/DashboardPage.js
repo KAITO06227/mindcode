@@ -305,14 +305,6 @@ const DashboardPage = () => {
               </EmptyIcon>
               <h3 style={{ color: '#ffffff', marginBottom: '0.5rem' }}>まだプロジェクトがありません</h3>
               <p>最初のプロジェクトを作成して始めましょう！</p>
-              <Button 
-                variant="primary" 
-                onClick={() => setShowCreateModal(true)}
-                style={{ marginTop: '1rem' }}
-              >
-                <FiPlus size={16} />
-                プロジェクトを作成
-              </Button>
             </EmptyState>
           ) : (
             <ProjectsGrid>

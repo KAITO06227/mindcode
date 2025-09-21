@@ -3,6 +3,7 @@ const { verifyToken, isTeacher } = require('../middleware/auth');
 const db = require('../database/connection');
 const fs = require('fs').promises;
 const path = require('path');
+const { serveProjectAsset } = require('../utils/projectPreviewUtils');
 
 const router = express.Router();
 
@@ -93,27 +94,44 @@ router.get('/projects/:projectId/preview', verifyToken, isTeacher, async (req, r
   }
 });
 
-// Serve live project preview (teachers only)
-router.get('/projects/:projectId/live', verifyToken, isTeacher, async (req, res) => {
+const handleProjectAssetRequest = async (req, res) => {
   try {
-    const [files] = await db.execute(`
-      SELECT pf.* 
-      FROM project_files pf 
-      JOIN projects p ON pf.project_id = p.id 
-      WHERE p.id = ? AND pf.file_name = 'index.html'
-    `, [req.params.projectId]);
+    const projectId = req.params.projectId;
+    const requestedPath = req.params[0] || 'index.html';
 
-    if (files.length === 0) {
-      return res.status(404).send('<h1>No index.html found in this project</h1>');
+    // Load project and owner to resolve filesystem path
+    const [projects] = await db.execute(`
+      SELECT p.*, u.id as user_id 
+      FROM projects p 
+      JOIN users u ON p.user_id = u.id 
+      WHERE p.id = ?
+    `, [projectId]);
+
+    if (projects.length === 0) {
+      return res.status(404).send('<h1>Project not found</h1>');
     }
 
-    // Serve the HTML content
-    res.setHeader('Content-Type', 'text/html');
-    res.send(files[0].content);
+    const project = projects[0];
+    const projectRoot = path.join(__dirname, '../../user_projects', project.user_id.toString(), projectId);
+
+    await serveProjectAsset({
+      projectRoot,
+      requestedPath,
+      projectId,
+      token: req.query.token,
+      res,
+      db,
+      baseHref: `${req.baseUrl}/projects/${projectId}/live/`
+    });
   } catch (error) {
+    console.error('Error serving project preview:', error);
     res.status(500).send('<h1>Error loading project</h1>');
   }
-});
+};
+
+// Serve live project preview and assets (teachers only)
+router.get('/projects/:projectId/live', handleProjectAssetRequest);
+router.get('/projects/:projectId/live/*', handleProjectAssetRequest);
 
 // Get project files for teacher viewing (teachers only)
 router.get('/projects/:projectId/files', verifyToken, isTeacher, async (req, res) => {
@@ -125,6 +143,43 @@ router.get('/projects/:projectId/files', verifyToken, isTeacher, async (req, res
     res.json(files);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching project files' });
+  }
+});
+
+// Get Claude prompt history for a project (teachers only)
+router.get('/projects/:projectId/claude-prompts', verifyToken, isTeacher, async (req, res) => {
+  try {
+    const projectId = req.params.projectId;
+
+    const [projects] = await db.execute(`
+      SELECT p.id, p.name, p.user_id, u.name AS owner_name, u.email AS owner_email
+      FROM projects p
+      JOIN users u ON p.user_id = u.id
+      WHERE p.id = ?
+    `, [projectId]);
+
+    if (projects.length === 0) {
+      return res.status(404).json({ message: 'Project not found' });
+    }
+
+    const project = projects[0];
+
+    const [logs] = await db.execute(`
+      SELECT cpl.id, cpl.prompt, cpl.created_at, cpl.user_id,
+             u.name AS user_name, u.email AS user_email
+      FROM claude_prompt_logs cpl
+      JOIN users u ON cpl.user_id = u.id
+      WHERE cpl.project_id = ?
+      ORDER BY cpl.created_at DESC
+    `, [projectId]);
+
+    res.json({
+      project,
+      prompts: logs
+    });
+  } catch (error) {
+    console.error('Error fetching Claude prompts:', error);
+    res.status(500).json({ message: 'Error fetching Claude prompt history' });
   }
 });
 

@@ -46,6 +46,16 @@ CREATE TABLE IF NOT EXISTS claude_sessions (
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS claude_prompt_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  prompt TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS git_commits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id INTEGER NOT NULL,
@@ -85,3 +95,6 @@ FOR EACH ROW
 BEGIN
   UPDATE claude_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
+
+CREATE INDEX IF NOT EXISTS idx_claude_prompt_logs_project_id ON claude_prompt_logs(project_id);
+CREATE INDEX IF NOT EXISTS idx_claude_prompt_logs_user_id ON claude_prompt_logs(user_id);

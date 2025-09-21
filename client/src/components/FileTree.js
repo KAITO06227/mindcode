@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
+import { io as ioClient } from 'socket.io-client';
 import {
   FiFile,
   FiFolder,
@@ -16,6 +17,8 @@ const TreeContainer = styled.div`
   flex: 1;
   overflow-y: auto;
   padding: 0.5rem;
+  outline: ${props => props.$isRootDropTarget ? '1px dashed #007acc' : 'none'};
+  outline-offset: -4px;
 `;
 
 const TreeItem = styled.div`
@@ -29,6 +32,7 @@ const TreeItem = styled.div`
   border-radius: 4px;
   margin: 1px 0;
   position: relative;
+  outline: ${props => props.$isDropTarget ? '1px dashed #007acc' : 'none'};
 
   &:hover {
     background-color: ${props => props.$selected ? '#094771' : '#2a2a2a'};
@@ -103,6 +107,14 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
   const [newItemName, setNewItemName] = useState('');
   const [selectedItem, setSelectedItem] = useState(null);
   const fileInputRef = useRef(null);
+  const socketRef = useRef(null);
+  const [draggedItem, setDraggedItem] = useState(null);
+  const [dragOverPath, setDragOverPath] = useState(null);
+
+  const isHiddenName = (name) => {
+    if (!name) return false;
+    return name.startsWith('.');
+  };
 
   // Set up global file tree refresh function
   useEffect(() => {
@@ -119,6 +131,41 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       }
     };
   }, [onTreeUpdate]);
+
+  useEffect(() => {
+    if (!projectId) {
+      return undefined;
+    }
+
+    const baseUrl = process.env.NODE_ENV === 'production' ? undefined : 'http://localhost:3001';
+    const namespaceUrl = baseUrl ? `${baseUrl}/file-events` : '/file-events';
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+
+    const socket = ioClient(namespaceUrl, {
+      query: {
+        projectId,
+        token
+      },
+      transports: ['websocket', 'polling']
+    });
+
+    socketRef.current = socket;
+
+    socket.on('file-tree:update', (event) => {
+      if (event?.projectId?.toString() === projectId?.toString()) {
+        if (onTreeUpdate) {
+          onTreeUpdate();
+        }
+      }
+    });
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+    };
+  }, [projectId, onTreeUpdate]);
 
   const handleItemClick = (item, event) => {
     event.stopPropagation();
@@ -302,23 +349,187 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
     }
   };
 
+  const getParentPath = (pathString) => {
+    if (!pathString) return '';
+    const lastSlash = pathString.lastIndexOf('/');
+    return lastSlash === -1 ? '' : pathString.slice(0, lastSlash);
+  };
+
+  const isDescendant = (source, target) => {
+    if (!source || !target) return false;
+    return target.startsWith(`${source}/`);
+  };
+
+  const moveItem = async (source, destination) => {
+    if (!projectId || !source) {
+      return;
+    }
+
+    const trimmedDestination = destination || '';
+
+    if (trimmedDestination && (trimmedDestination === source || isDescendant(source, trimmedDestination))) {
+      alert('同じアイテムまたはその配下には移動できません');
+      setDraggedItem(null);
+      setDragOverPath(null);
+      return;
+    }
+
+    const currentParent = getParentPath(source);
+    if (currentParent === trimmedDestination) {
+      setDraggedItem(null);
+      setDragOverPath(null);
+      return;
+    }
+
+    try {
+      await axios.post(`/api/filesystem/${projectId}/move`, {
+        sourcePath: source,
+        destinationPath: trimmedDestination
+      });
+
+      if (trimmedDestination) {
+        setExpandedFolders(prev => new Set([...prev, trimmedDestination]));
+      }
+
+      if (onTreeUpdate) {
+        onTreeUpdate();
+      }
+    } catch (error) {
+      console.error('Error moving item:', error);
+      const message = error.response?.data?.message || error.message;
+      alert(`移動に失敗しました: ${message}`);
+    } finally {
+      setDraggedItem(null);
+      setDragOverPath(null);
+    }
+  };
+
+  const handleDragStart = (item, event) => {
+    setDraggedItem(item);
+    setDragOverPath(null);
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', item.path);
+    }
+  };
+
+  const handleDragEnd = () => {
+    setDraggedItem(null);
+    setDragOverPath(null);
+  };
+
+  const handleDragEnter = (item, event) => {
+    if (event.stopPropagation) {
+      event.stopPropagation();
+    }
+    if (!draggedItem || !item || item.type !== 'folder') {
+      return;
+    }
+
+    if (draggedItem.path === item.path || isDescendant(draggedItem.path, item.path)) {
+      return;
+    }
+
+    setDragOverPath(item.path);
+  };
+
+  const handleDragLeave = (item) => {
+    if (dragOverPath === item?.path) {
+      setDragOverPath(null);
+    }
+  };
+
+  const handleDragOverItem = (item, event) => {
+    if (!draggedItem || !item || item.type !== 'folder') {
+      return;
+    }
+
+    if (event.preventDefault) {
+      event.preventDefault();
+    }
+    if (event.stopPropagation) {
+      event.stopPropagation();
+    }
+
+    if (draggedItem.path === item.path || isDescendant(draggedItem.path, item.path)) {
+      setDragOverPath(null);
+      return;
+    }
+
+    setDragOverPath(item.path);
+  };
+
+  const handleDropOnFolder = async (item, event) => {
+    if (!draggedItem || !item || item.type !== 'folder') {
+      return;
+    }
+
+    if (event.preventDefault) {
+      event.preventDefault();
+    }
+    if (event.stopPropagation) {
+      event.stopPropagation();
+    }
+
+    await moveItem(draggedItem.path, item.path || '');
+  };
+
+  const handleRootDragOver = (event) => {
+    if (!draggedItem) {
+      return;
+    }
+
+    if (event.target === event.currentTarget) {
+      if (event.preventDefault) {
+        event.preventDefault();
+      }
+      setDragOverPath('__ROOT__');
+    }
+  };
+
+  const handleRootDragLeave = (event) => {
+    if (event.target === event.currentTarget && dragOverPath === '__ROOT__') {
+      setDragOverPath(null);
+    }
+  };
+
+  const handleRootDrop = async (event) => {
+    if (!draggedItem) {
+      return;
+    }
+
+    if (event.target === event.currentTarget) {
+      if (event.preventDefault) {
+        event.preventDefault();
+      }
+      if (event.stopPropagation) {
+        event.stopPropagation();
+      }
+
+      await moveItem(draggedItem.path, '');
+    }
+  };
+
   const handleSync = async () => {
+    if (!projectId) {
+      return;
+    }
+
     try {
       const response = await axios.post(`/api/filesystem/${projectId}/sync`);
       const result = response.data;
-      
-      // Update the file tree to show new files
-      onTreeUpdate();
-      
-      // Show sync result to user
+
+      if (onTreeUpdate) {
+        onTreeUpdate();
+      }
+
       const message = `同期が完了しました:\n` +
         `新規作成: ${result.totalCreated} 件\n` +
         `更新: ${result.totalUpdated} 件\n` +
+        `削除: ${result.totalDeleted} 件\n` +
         `エラー: ${result.totalErrors} 件`;
-      
+
       alert(message);
-      
-      console.log('Sync completed:', result);
     } catch (error) {
       console.error('Error syncing filesystem:', error);
       alert('ファイルシステムの同期に失敗しました');
@@ -339,17 +550,30 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
   };
 
   const renderTreeItem = (item, depth = 0, parentPath = '') => {
-    const currentPath = parentPath ? `${parentPath}/${item.name}` : item.name;
-    const isExpanded = expandedFolders.has(currentPath);
-    // Only use selectedItem for highlighting (toolbar selection)
+    const itemName = item.name || item.file_name || '';
+    if (isHiddenName(itemName)) {
+      return null;
+    }
+
+    const resolvedPath = item.path || (parentPath ? `${parentPath}/${itemName}` : itemName);
+    const isExpanded = expandedFolders.has(resolvedPath);
     const isSelected = selectedItem && selectedItem.id === item.id;
+    const itemWithPath = { ...item, name: itemName, path: resolvedPath };
 
     return (
-      <div key={currentPath}>
+      <div key={resolvedPath}>
         <TreeItem
           $depth={depth}
           $selected={isSelected}
-          onClick={(e) => handleItemClick({ ...item, path: currentPath }, e)}
+          $isDropTarget={dragOverPath === resolvedPath}
+          draggable={!!projectId}
+          onClick={(e) => handleItemClick(itemWithPath, e)}
+          onDragStart={(e) => handleDragStart(itemWithPath, e)}
+          onDragEnd={handleDragEnd}
+          onDragEnter={(e) => handleDragEnter(itemWithPath, e)}
+          onDragOver={(e) => handleDragOverItem(itemWithPath, e)}
+          onDragLeave={() => handleDragLeave(itemWithPath)}
+          onDrop={(e) => handleDropOnFolder(itemWithPath, e)}
         >
           <ItemIcon $type={item.type} $isOpen={isExpanded}>
             {item.type === 'folder' ? (
@@ -371,14 +595,13 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
               autoFocus
             />
           ) : (
-            <ItemName>{item.name}</ItemName>
+            <ItemName>{itemName}</ItemName>
           )}
         </TreeItem>
 
         {item.type === 'folder' && isExpanded && item.children && (
-          Object.values(item.children).map(child =>
-            renderTreeItem(child, depth + 1, currentPath)
-          )
+          Object.values(item.children)
+            .map(child => renderTreeItem(child, depth + 1, resolvedPath))
         )}
       </div>
     );
@@ -409,8 +632,15 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
         </div>
       </ToolbarContainer>
 
-      <TreeContainer>
-        {Object.values(fileTree).map(item => renderTreeItem(item))}
+      <TreeContainer
+        $isRootDropTarget={dragOverPath === '__ROOT__'}
+        onDragOver={handleRootDragOver}
+        onDragLeave={handleRootDragLeave}
+        onDrop={handleRootDrop}
+      >
+        {Object.values(fileTree)
+          .map(item => renderTreeItem(item))
+          .filter(Boolean)}
       </TreeContainer>
 
       <input

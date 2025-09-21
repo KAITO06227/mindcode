@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS claude_sessions (
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS claude_prompt_logs (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  project_id VARCHAR(36) NOT NULL,
+  user_id INT NOT NULL,
+  prompt TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 -- Git commits table with UUID foreign key
 CREATE TABLE IF NOT EXISTS git_commits (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -70,3 +80,5 @@ CREATE INDEX idx_project_files_project_id ON project_files(project_id);
 CREATE INDEX idx_claude_sessions_user_id ON claude_sessions(user_id);
 CREATE INDEX idx_claude_sessions_project_id ON claude_sessions(project_id);
 CREATE INDEX idx_git_commits_project_id ON git_commits(project_id);
+CREATE INDEX idx_claude_prompt_logs_project_id ON claude_prompt_logs(project_id);
+CREATE INDEX idx_claude_prompt_logs_user_id ON claude_prompt_logs(user_id);

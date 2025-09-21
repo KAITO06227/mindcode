@@ -5,13 +5,13 @@ import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
 import {
   FiArrowLeft,
-  FiUsers,
   FiFolder,
-  FiExternalLink,
   FiEye,
   FiEdit,
   FiTrash2,
-  FiLogOut
+  FiLogOut,
+  FiMessageSquare,
+  FiX
 } from 'react-icons/fi';
 
 const AdminContainer = styled.div`
@@ -104,32 +104,9 @@ const Main = styled.main`
   margin: 0 auto;
 `;
 
-const TabContainer = styled.div`
-  display: flex;
-  gap: 2px;
-  margin-bottom: 2rem;
-`;
-
-const Tab = styled.button`
-  padding: 0.75rem 1.5rem;
-  background-color: ${props => props.active ? '#007acc' : '#2d2d2d'};
-  color: ${props => props.active ? '#ffffff' : '#cccccc'};
-  border: none;
-  border-radius: 4px 4px 0 0;
-  cursor: pointer;
-  font-size: 0.875rem;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-
-  &:hover {
-    background-color: ${props => props.active ? '#007acc' : '#404040'};
-  }
-`;
-
 const ContentArea = styled.div`
   background-color: #2d2d2d;
-  border-radius: 0 8px 8px 8px;
+  border-radius: 8px;
   padding: 1.5rem;
 `;
 
@@ -228,21 +205,126 @@ const ProjectActions = styled.div`
   gap: 0.5rem;
 `;
 
+const SelectedUserSection = styled.div`
+  margin-top: 2rem;
+`;
+
+const SectionTitle = styled.h3`
+  color: #ffffff;
+  margin-bottom: 1rem;
+`;
+
+const EmptyMessage = styled.div`
+  color: #cccccc;
+  padding: 1rem;
+  background-color: #333;
+  border-radius: 6px;
+`;
+
+const ModalOverlay = styled.div`
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 2000;
+`;
+
+const ModalContent = styled.div`
+  background-color: #2d2d2d;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 720px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+`;
+
+const ModalHeader = styled.div`
+  padding: 1rem;
+  border-bottom: 1px solid #3a3a3a;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #ffffff;
+`;
+
+const ModalBody = styled.div`
+  padding: 1rem;
+  overflow-y: auto;
+`;
+
+const CloseButton = styled.button`
+  background: none;
+  border: none;
+  color: #cccccc;
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: 4px;
+
+  &:hover {
+    background-color: #555;
+    color: #ffffff;
+  }
+`;
+
+const PromptList = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+`;
+
+const PromptItem = styled.div`
+  background-color: #3a3a3a;
+  border-radius: 6px;
+  padding: 0.75rem;
+  color: #e0e0e0;
+`;
+
+const PromptMeta = styled.div`
+  font-size: 0.75rem;
+  color: #9e9e9e;
+  margin-bottom: 0.5rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+`;
+
+const getApiOrigin = () => {
+  const envOrigin = process.env.REACT_APP_API_ORIGIN || process.env.REACT_APP_BACKEND_URL;
+  if (envOrigin) {
+    return envOrigin;
+  }
+
+  if (window.location.origin.includes('3000')) {
+    return window.location.origin.replace('3000', '3001');
+  }
+
+  return window.location.origin;
+};
+
 const AdminPage = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('users');
   const [users, setUsers] = useState([]);
-  const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [userProjects, setUserProjects] = useState([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [promptModalOpen, setPromptModalOpen] = useState(false);
+  const [promptLogs, setPromptLogs] = useState([]);
+  const [promptLoading, setPromptLoading] = useState(false);
+  const [promptProject, setPromptProject] = useState(null);
+  const [promptError, setPromptError] = useState('');
 
   useEffect(() => {
-    if (activeTab === 'users') {
-      fetchUsers();
-    } else if (activeTab === 'projects') {
-      fetchProjects();
-    }
-  }, [activeTab]);
+    fetchUsers();
+  }, []);
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -256,24 +338,15 @@ const AdminPage = () => {
     }
   };
 
-  const fetchProjects = async () => {
-    setLoading(true);
-    try {
-      const response = await axios.get('/api/admin/projects');
-      setProjects(response.data);
-    } catch (error) {
-      console.error('Error fetching projects:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const updateUserRole = async (userId, newRole) => {
     try {
       await axios.patch(`/api/admin/users/${userId}/role`, { role: newRole });
       setUsers(users.map(user => 
         user.id === userId ? { ...user, role: newRole } : user
       ));
+      if (selectedUser?.id === userId) {
+        setSelectedUser({ ...selectedUser, role: newRole });
+      }
     } catch (error) {
       console.error('Error updating user role:', error);
       alert('ユーザーの役割更新に失敗しました');
@@ -288,9 +361,35 @@ const AdminPage = () => {
     try {
       await axios.delete(`/api/admin/users/${userId}`);
       setUsers(users.filter(user => user.id !== userId));
+      if (selectedUser?.id === userId) {
+        setSelectedUser(null);
+        setUserProjects([]);
+      }
     } catch (error) {
       console.error('Error deleting user:', error);
       alert('ユーザーの削除に失敗しました');
+    }
+  };
+
+  const handleViewProjects = async (targetUser) => {
+    if (selectedUser?.id === targetUser.id) {
+      setSelectedUser(null);
+      setUserProjects([]);
+      return;
+    }
+
+    setSelectedUser(targetUser);
+    setProjectsLoading(true);
+    setUserProjects([]);
+
+    try {
+      const response = await axios.get(`/api/admin/users/${targetUser.id}/projects`);
+      setUserProjects(response.data);
+    } catch (error) {
+      console.error('Error fetching user projects:', error);
+      alert('プロジェクトの取得に失敗しました');
+    } finally {
+      setProjectsLoading(false);
     }
   };
 
@@ -301,8 +400,10 @@ const AdminPage = () => {
   const viewProjectPreview = async (projectId) => {
     try {
       const response = await axios.get(`/api/admin/projects/${projectId}/preview`);
-      const previewUrl = `${window.location.origin}${response.data.previewUrl}`;
-      window.open(previewUrl, '_blank');
+      const baseOrigin = getApiOrigin();
+      const previewUrl = new URL(response.data.previewUrl, baseOrigin);
+
+      window.open(previewUrl.toString(), '_blank', 'noopener');
     } catch (error) {
       console.error('Error opening project preview:', error);
       alert('プロジェクトのプレビューを開けませんでした');
@@ -311,6 +412,38 @@ const AdminPage = () => {
 
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString();
+  };
+
+  const formatDateTime = (dateString) => {
+    return new Date(dateString).toLocaleString();
+  };
+
+  const closePromptModal = () => {
+    setPromptModalOpen(false);
+    setPromptLogs([]);
+    setPromptProject(null);
+    setPromptError('');
+  };
+
+  const openPromptHistory = async (project) => {
+    setPromptModalOpen(true);
+    setPromptProject(project);
+    setPromptLoading(true);
+    setPromptError('');
+    setPromptLogs([]);
+
+    try {
+      const response = await axios.get(`/api/admin/projects/${project.id}/claude-prompts`);
+      if (response.data?.project) {
+        setPromptProject(prev => ({ ...prev, ...response.data.project }));
+      }
+      setPromptLogs(response.data?.prompts || []);
+    } catch (error) {
+      console.error('Error fetching Claude prompt history:', error);
+      setPromptError('プロンプト履歴の取得に失敗しました');
+    } finally {
+      setPromptLoading(false);
+    }
   };
 
   return (
@@ -339,133 +472,165 @@ const AdminPage = () => {
       </Header>
 
       <Main>
-        <TabContainer>
-          <Tab 
-            active={activeTab === 'users'} 
-            onClick={() => setActiveTab('users')}
-          >
-            <FiUsers size={16} />
-            ユーザー管理
-          </Tab>
-          <Tab 
-            active={activeTab === 'projects'} 
-            onClick={() => setActiveTab('projects')}
-          >
-            <FiFolder size={16} />
-            プロジェクト一覧
-          </Tab>
-        </TabContainer>
-
         <ContentArea>
-          {activeTab === 'users' && (
-            <div>
-              <h3 style={{ color: '#ffffff', marginBottom: '1rem' }}>
-                ユーザー管理 ({users.length}人)
-              </h3>
-              
-              {loading ? (
-                <div style={{ color: '#cccccc', textAlign: 'center', padding: '2rem' }}>
-                  ユーザーを読み込み中...
-                </div>
-              ) : (
-                <Table>
-                  <thead>
-                    <tr>
-                      <TableHeader>ユーザー</TableHeader>
-                      <TableHeader>メール</TableHeader>
-                      <TableHeader>役割</TableHeader>
-                      <TableHeader>登録日</TableHeader>
-                      <TableHeader>操作</TableHeader>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users.map(user => (
-                      <TableRow key={user.id}>
-                        <TableCell>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <img 
-                              src={user.avatar_url} 
-                              alt={user.name} 
-                              style={{ width: '24px', height: '24px', borderRadius: '50%' }}
-                            />
-                            {user.name}
-                          </div>
-                        </TableCell>
-                        <TableCell>{user.email}</TableCell>
-                        <TableCell>
-                          <Select
-                            value={user.role}
-                            onChange={(e) => updateUserRole(user.id, e.target.value)}
-                          >
-                            <option value="student">学生</option>
-                            <option value="teacher">教師</option>
-                          </Select>
-                        </TableCell>
-                        <TableCell>{formatDate(user.created_at)}</TableCell>
-                        <TableCell>
-                          <ActionButton
-                            onClick={() => deleteUser(user.id)}
-                            title="ユーザーを削除"
-                          >
-                            <FiTrash2 size={14} />
-                          </ActionButton>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </tbody>
-                </Table>
-              )}
-            </div>
-          )}
+          <div>
+            <h3 style={{ color: '#ffffff', marginBottom: '1rem' }}>
+              ユーザー管理 ({users.length}人)
+            </h3>
 
-          {activeTab === 'projects' && (
-            <div>
-              <h3 style={{ color: '#ffffff', marginBottom: '1rem' }}>
-                プロジェクト一覧 ({projects.length} projects)
-              </h3>
-              
-              {loading ? (
+            {loading ? (
+              <div style={{ color: '#cccccc', textAlign: 'center', padding: '2rem' }}>
+                ユーザーを読み込み中...
+              </div>
+            ) : (
+              <Table>
+                <thead>
+                  <tr>
+                    <TableHeader>ユーザー</TableHeader>
+                    <TableHeader>メール</TableHeader>
+                    <TableHeader>役割</TableHeader>
+                    <TableHeader>登録日</TableHeader>
+                    <TableHeader>操作</TableHeader>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map(currentUser => (
+                    <TableRow key={currentUser.id}>
+                      <TableCell>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <img
+                            src={currentUser.avatar_url}
+                            alt={currentUser.name}
+                            style={{ width: '24px', height: '24px', borderRadius: '50%' }}
+                          />
+                          {currentUser.name}
+                        </div>
+                      </TableCell>
+                      <TableCell>{currentUser.email}</TableCell>
+                      <TableCell>
+                        <Select
+                          value={currentUser.role}
+                          onChange={(e) => updateUserRole(currentUser.id, e.target.value)}
+                        >
+                          <option value="student">学生</option>
+                          <option value="teacher">教師</option>
+                        </Select>
+                      </TableCell>
+                      <TableCell>{formatDate(currentUser.created_at)}</TableCell>
+                      <TableCell>
+                        <ActionButton
+                          onClick={() => handleViewProjects(currentUser)}
+                          title="このユーザーのプロジェクトを見る"
+                        >
+                          <FiFolder size={14} />
+                        </ActionButton>
+                        <ActionButton
+                          onClick={() => deleteUser(currentUser.id)}
+                          title="ユーザーを削除"
+                        >
+                          <FiTrash2 size={14} />
+                        </ActionButton>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </tbody>
+              </Table>
+            )}
+          </div>
+
+          {selectedUser && (
+            <SelectedUserSection>
+              <SectionTitle>
+                {selectedUser.name} さんのプロジェクト ({userProjects.length}件)
+              </SectionTitle>
+
+              {projectsLoading ? (
                 <div style={{ color: '#cccccc', textAlign: 'center', padding: '2rem' }}>
                   プロジェクトを読み込み中...
                 </div>
+              ) : userProjects.length === 0 ? (
+                <EmptyMessage>プロジェクトがありません。</EmptyMessage>
               ) : (
-                projects.map(project => (
+                userProjects.map(project => (
                   <ProjectCard key={project.id}>
                     <ProjectInfo>
                       <ProjectTitle>{project.name}</ProjectTitle>
                       <ProjectMeta>
-                        <span>所有者: {project.user_name} ({project.user_email})</span>
                         <span>更新: {formatDate(project.updated_at)}</span>
                         {project.git_url && <span>Git: 接続済み</span>}
                       </ProjectMeta>
                     </ProjectInfo>
                     <ProjectActions>
-                      <ActionButton
+                      <Button
+                        onClick={() => openPromptHistory(project)}
+                        title="Claudeプロンプト履歴"
+                      >
+                        <FiMessageSquare size={16} />
+                        プロンプト
+                      </Button>
+                      <Button
+                        onClick={() => viewProjectPreview(project.id)}
+                        title="プロジェクトを表示"
+                      >
+                        <FiEye size={16} />
+                        表示
+                      </Button>
+                      <Button
                         onClick={() => viewProject(project.id)}
                         title="プロジェクトを編集"
                       >
                         <FiEdit size={16} />
-                      </ActionButton>
-                      <ActionButton
-                        onClick={() => viewProjectPreview(project.id)}
-                        title="プロジェクトをプレビュー"
-                      >
-                        <FiEye size={16} />
-                      </ActionButton>
-                      <ActionButton
-                        onClick={() => viewProjectPreview(project.id)}
-                        title="新しいタブで開く"
-                      >
-                        <FiExternalLink size={16} />
-                      </ActionButton>
+                        編集
+                      </Button>
                     </ProjectActions>
                   </ProjectCard>
                 ))
               )}
-            </div>
+            </SelectedUserSection>
           )}
         </ContentArea>
       </Main>
+
+      {promptModalOpen && (
+        <ModalOverlay onClick={closePromptModal}>
+          <ModalContent onClick={(e) => e.stopPropagation()}>
+            <ModalHeader>
+              <div>
+                <div style={{ fontSize: '0.875rem', color: '#aaaaaa' }}>Claude プロンプト履歴</div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>
+                  {promptProject?.name || 'プロジェクト'}
+                </div>
+              </div>
+              <CloseButton onClick={closePromptModal}>
+                <FiX size={18} />
+              </CloseButton>
+            </ModalHeader>
+            <ModalBody>
+              {promptLoading ? (
+                <div style={{ color: '#cccccc', textAlign: 'center', padding: '1.5rem' }}>
+                  プロンプト履歴を読み込み中...
+                </div>
+              ) : promptError ? (
+                <EmptyMessage>{promptError}</EmptyMessage>
+              ) : promptLogs.length === 0 ? (
+                <EmptyMessage>保存されたプロンプトはありません。</EmptyMessage>
+              ) : (
+                <PromptList>
+                  {promptLogs.map((log) => (
+                    <PromptItem key={log.id}>
+                      <PromptMeta>
+                        <span>{log.user_name || '不明なユーザー'} ({log.user_email})</span>
+                        <span>{formatDateTime(log.created_at)}</span>
+                      </PromptMeta>
+                      <div style={{ whiteSpace: 'pre-wrap' }}>{log.prompt}</div>
+                    </PromptItem>
+                  ))}
+                </PromptList>
+              )}
+            </ModalBody>
+          </ModalContent>
+        </ModalOverlay>
+      )}
     </AdminContainer>
   );
 };
