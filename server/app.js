@@ -36,7 +36,6 @@ const db = require('./database/connection');
 // Routes
 const authRoutes = require('./routes/auth');
 const projectRoutes = require('./routes/projects');
-const fileRoutes = require('./routes/files'); // Legacy - will be phased out
 const claudeRoutes = require('./routes/claude');
 const adminRoutes = require('./routes/admin');
 const fileSystemRoutes = require('./routes/fileSystem');
@@ -45,7 +44,6 @@ const { initFileTreeEvents } = require('./sockets/fileTreeEvents');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
-app.use('/api/files', fileRoutes); // Legacy support
 app.use('/api/claude', claudeRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/filesystem', fileSystemRoutes); // New filesystem API

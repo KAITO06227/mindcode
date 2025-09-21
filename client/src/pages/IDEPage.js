@@ -243,7 +243,7 @@ const IDEPage = () => {
       // 現在選択中のファイルがある場合は、そのファイルの内容を再読み込み
       if (selectedFile) {
         try {
-          const fileResponse = await axios.get(`/api/files/${projectId}/${selectedFile.id}`);
+          const fileResponse = await axios.get(`/api/filesystem/${projectId}/files/${selectedFile.id}`);
           setSelectedFile(fileResponse.data);
           console.log('Current file reloaded after tree update');
         } catch (fileError) {
