@@ -7,9 +7,6 @@ import {
   FiClock,
   FiUser,
   FiRefreshCw,
-  FiPlus,
-  FiChevronDown,
-  FiChevronRight,
   FiCode
 } from 'react-icons/fi';
 
@@ -228,10 +225,9 @@ const GitPanel = ({ projectId, onRefresh }) => {
       setLoading(true);
       
       // データを並列で取得
-      const [statusRes, historyRes, branchesRes] = await Promise.all([
+      const [statusRes, historyRes] = await Promise.all([
         axios.get(`/api/version-control/${projectId}/status`).catch(() => ({ data: { initialized: false } })),
-        axios.get(`/api/version-control/${projectId}/history?limit=10`).catch(() => ({ data: [] })),
-        Promise.resolve({ data: [] })
+        axios.get(`/api/version-control/${projectId}/history?limit=10`).catch(() => ({ data: [] }))
       ]);
       
       setStatus(statusRes.data);
@@ -269,29 +265,6 @@ const GitPanel = ({ projectId, onRefresh }) => {
     } catch (error) {
       console.error('Commit error:', error);
       alert('コミットエラー: ' + (error.response?.data?.message || error.message));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ブランチ切り替え
-  const handleSwitchBranch = async (branchName) => {
-    try {
-      setLoading(true);
-      
-      await axios.post(`/api/version-control/${projectId}/checkout`, {
-        branchName
-      });
-      
-      await fetchGitData();
-      
-      if (onRefresh) {
-        onRefresh(); // ファイルツリーをリフレッシュ
-      }
-      
-    } catch (error) {
-      console.error('Branch switch error:', error);
-      alert('ブランチ切り替えエラー: ' + (error.response?.data?.message || error.message));
     } finally {
       setLoading(false);
     }
