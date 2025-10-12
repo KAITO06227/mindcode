@@ -3,6 +3,7 @@ const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const db = require('../database/connection');
 const { generateToken } = require('../middleware/auth');
+const { ensureUserRoot } = require('../utils/userWorkspace');
 
 const router = express.Router();
 
@@ -13,12 +14,6 @@ passport.use(new GoogleStrategy({
   callbackURL: process.env.GOOGLE_CALLBACK_URL || '/api/auth/google/callback'
 }, async (accessToken, refreshToken, profile, done) => {
   try {
-    console.log('Google OAuth Strategy - Profile received:', {
-      id: profile.id,
-      email: profile.emails[0]?.value,
-      name: profile.displayName
-    });
-
     const email = profile.emails[0].value;
     const name = profile.displayName;
     const googleId = profile.id;
@@ -28,7 +23,6 @@ passport.use(new GoogleStrategy({
     const allowedDomain = '@gsuite.si.aoyama.ac.jp';
 
     if (!email.endsWith(allowedDomain)) {
-      console.log('Access denied for unauthorized domain:', email);
       return done(new Error('Access denied: You are not authorized to use this application'), null);
     }
 
@@ -42,14 +36,13 @@ passport.use(new GoogleStrategy({
     if (existingUsers.length > 0) {
       // Update existing user
       user = existingUsers[0];
-      console.log('Updating existing user:', user.email);
       await db.execute(
         'UPDATE users SET name = ?, avatar_url = ?, updated_at = NOW() WHERE id = ?',
         [name, avatarUrl, user.id]
       );
+      await ensureUserRoot(user);
     } else {
       // Create new user
-      console.log('Creating new user:', email);
       const [result] = await db.execute(
         'INSERT INTO users (google_id, email, name, avatar_url) VALUES (?, ?, ?, ?)',
         [googleId, email, name, avatarUrl]
@@ -57,9 +50,9 @@ passport.use(new GoogleStrategy({
       
       const [newUsers] = await db.execute('SELECT * FROM users WHERE id = ?', [result.insertId]);
       user = newUsers[0];
+      await ensureUserRoot(user);
     }
 
-    console.log('OAuth Strategy - User processed:', user.email);
     return done(null, user);
   } catch (error) {
     console.error('OAuth Strategy Error:', error);
@@ -77,18 +70,14 @@ router.get('/google/callback',
   (req, res, next) => {
     passport.authenticate('google', { session: false }, (err, user, info) => {
       if (err) {
-        console.log('OAuth authentication error:', err.message);
         return res.redirect(`${process.env.CLIENT_URL || 'http://localhost:3000'}/login?error=unauthorized`);
       }
       
       if (!user) {
-        console.log('OAuth failed - No user found');
         return res.redirect(`${process.env.CLIENT_URL || 'http://localhost:3000'}/login?error=auth_failed`);
       }
       
-      console.log('OAuth callback - User:', user);
       const token = generateToken(user);
-      console.log('Generated token for user:', user.email);
       
       // Redirect to frontend with token
       res.redirect(`${process.env.CLIENT_URL || 'http://localhost:3000'}?token=${token}`);

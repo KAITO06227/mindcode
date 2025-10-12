@@ -1,0 +1,23 @@
+{
+  "installMethod": "unknown",
+  "autoUpdates": true,
+  "cachedStatsigGates": {
+    "tengu_disable_bypass_permissions_mode": false
+  },
+  "firstStartTime": "2025-09-24T06:17:47.287Z",
+  "userID": "4526caaae4bec247384f771e869c109c3f7679bbcf650572ea7deb2f9651272b",
+  "projects": {
+    "/Users/skmtkit/Desktop/guitaradot/mindcode": {
+      "allowedTools": [],
+      "history": [],
+      "mcpContextUris": [],
+      "mcpServers": {},
+      "enabledMcpjsonServers": [],
+      "disabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": false,
+      "projectOnboardingSeenCount": 0,
+      "hasClaudeMdExternalIncludesApproved": false,
+      "hasClaudeMdExternalIncludesWarningShown": false
+    }
+  }
+}

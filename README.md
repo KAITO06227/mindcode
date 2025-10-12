@@ -2,7 +2,7 @@
 
 <div align="center">
   <h3>青山学院大学学生・教職員向け Web開発IDE</h3>
-  <p>Claude Code AI支援機能付き</p>
+  <p>AI支援（Claude / Codex / Gemini）機能付き</p>
 </div>
 
 ---
@@ -13,8 +13,8 @@
 
 ### 🏛️ アーキテクチャの特徴
 - **二重ファイルシステム構造**: 物理ファイルシステムとデータベースファイルシステムの統合管理
-- **拡張Git統合**: GitManagerクラスによるバージョン管理とメタデータ同期
-- **Socket.IO ベースAI統合**: WebSocketでのClaude Code連携
+- **拡張トリップコード統合**: GitManagerクラスによるバージョン管理とメタデータ同期
+- **Socket.IO ベースAI統合**: WebSocketでの Claude / Codex / Gemini 連携
 - **ドメイン限定認証**: 青山学院大学専用のセキュアな環境
 
 ### 🎯 対象ユーザー
@@ -36,18 +36,19 @@
 - **ファイル管理**: フォルダ構造でのプロジェクト管理
 
 ### 🤖 AI支援
-- **Claude Code統合**: xterm.jsベースのターミナルでAI助手との対話
+- **マルチAI CLI対応**: Claude Code / OpenAI Codex / Google Gemini の各CLIを切り替えて利用可能
+- **統一エージェントガイド**: `.mindcode/` 配下のガイドファイルと `AI.md` で複数エージェントに共通指示を適用
 - **日本語完全対応**: すべてのUI・エラーメッセージ・AI対話を日本語で実行
-- **自動Git連携**: プロンプト送信前の自動コミット・プッシュ
+- **自動トリップコード連携**: プロンプト送信後の自動コミット・履歴管理
 - **Socket.IO アーキテクチャ**: WebSocketによるリアルタイムAI通信
-- **セッション管理**: プロジェクト別Claude プロセス管理
+- **セッション管理**: プロジェクト別AIプロセス管理
 
 ### 📁 プロジェクト管理
 - **二重ファイルシステム**: 物理ファイルとデータベースの統合管理
 - **拡張メタデータ**: ファイル権限・チェックサム・バージョン履歴
 - **アクセスログ**: 詳細なファイル操作履歴
 - **ファイルアップロード**: フォルダ構造を維持した一括アップロード
-- **Git統合**: GitManagerによる厳格なバージョン管理
+- **トリップコード統合**: Gitを基盤としたバージョン管理をUI上で「トリップコード」として提供
 
 ### 👨‍🏫 教師機能
 - **学生管理**: 全学生アカウントの閲覧・管理
@@ -59,7 +60,7 @@
 ### フロントエンド
 - **React**: Create React App (ポート3000)
 - **Monaco Editor**: VS Code エンジンベースのコードエディタ
-- **Socket.IO Client**: Claude Code統合のWebSocket通信
+- **Socket.IO Client**: マルチAI統合のWebSocket通信
 - **Styled Components**: CSS-in-JS スタイリング
 
 ### バックエンド  
@@ -81,7 +82,7 @@
 - Node.js 16+ 
 - MySQL 8.0+
 - Google Cloud Console アカウント
-- Claude CLI (オプション: AI機能使用時)
+- Claude CLI / Codex CLI / Gemini CLI (オプション: それぞれのAI機能使用時)
 
 ### インストール
 
@@ -107,8 +108,10 @@ GOOGLE_CALLBACK_URL=http://localhost:3001/api/auth/google/callback
 # JWT Secret
 JWT_SECRET=your_jwt_secret_key
 
-# Claude API Key
+# Claude / Codex / Gemini API Keys（必要なもののみ）
 CLAUDE_API_KEY=your_claude_api_key
+CODEX_API_KEY=your_openai_api_key
+GEMINI_API_KEY=your_google_api_key
 
 # Database
 DB_HOST=localhost
@@ -178,7 +181,6 @@ mindcode/
 │   │   ├── components/     # UIコンポーネント
 │   │   │   ├── FileTree    # ファイル管理UI
 │   │   │   ├── GitPanel    # Git統合UI
-│   │   │   └── SmallBrowser # HTML/CSS/JSプレビュー
 │   │   ├── pages/         # ページコンポーネント
 │   │   │   ├── IDEPage     # メインIDE画面
 │   │   │   ├── AdminPage   # 教師管理画面
@@ -336,9 +338,9 @@ claude_sessions: id, user_id, project_id, session_data
 - POST /:projectId/commit - コミット作成
 - GET /:projectId/history - コミット履歴取得
 
-### Claude Code (/api/claude)
-- POST /execute/:projectId - Claude Codeコマンド実行
-- POST /session/:projectId - インタラクティブセッション開始
+### AI CLI (/api/claude)
+- POST /execute/:projectId - CLIコマンド実行（provider指定でClaude/Codex/Geminiを選択）
+- POST /session/:projectId - インタラクティブセッション開始（デフォルトはClaude Code）
 
 ### 管理 (/api/admin)
 - GET /users - ユーザー一覧取得
@@ -359,23 +361,23 @@ claude_sessions: id, user_id, project_id, session_data
    - 拡張ファイルシステムスキーマが適用されているか確認
    - Docker環境の場合、コンテナが正常に起動しているか確認
 
-3. **Claude Code統合エラー**
-   - Claude CLI がインストールされているか確認（ENOENT エラー）
-   - プロジェクトディレクトリでClaude プロセスが起動できるか確認
+3. **AI CLI統合エラー**
+   - それぞれのCLI（Claude / Codex / Gemini）がインストール済みか確認（`ENOENT` エラー）
+   - 対象プロジェクトでCLIプロセスが起動・終了できるか確認
    - Socket.IO 接続が正常に確立されているか確認
 
-4. **Git操作エラー**
+4. **トリップコード操作エラー**
    - GitManager の厳格なエラー処理により操作が中止される
    - 物理ファイルとデータベースの同期状態を確認
-   - Git初期化が正常に完了しているか確認
+   - トリップコード初期化が正常に完了しているか確認
 
 ## 🔄 アップデート履歴
 
 ### v1.0.0 (2024年)
 - 初回リリース
 - 二重ファイルシステム構造実装
-- 拡張Git統合（GitManager）
-- Socket.IO ベースClaude Code統合
+- 拡張トリップコード統合（GitManager）
+- Socket.IO ベースAI CLI統合
 - Google OAuth認証（青山学院大学ドメイン限定）
 - 日本語UI完全対応
 - xterm.js ベースターミナル
@@ -389,11 +391,11 @@ claude_sessions: id, user_id, project_id, session_data
 - **スモールブラウザ機能**: `pikeplace/static/kenya.html` の124行目周辺のiframe実装
 - **Monaco Editorの使用方法**: `pikeplace/static/lib/monaco-editor/`
 
-### Claude Code統合の仕様
-- APIキーは先生側で管理、学生からは見えない設計
-- プロンプト送信時に自動でgit add, commit, pushを実行
-- 学生は任意のタイミングでもgit操作可能
-- コミットメッセージは自動生成（プロンプト送信時）、手動入力（任意実行時）
+### AI CLI統合の仕様
+- APIキーは先生側で管理し、利用者からは見えない設計
+- プロンプト完了時に自動で `git add` / `commit` を実行しトリップコード履歴を更新
+- 学生は任意のタイミングでもトリップコード操作（コミットなど）が可能
+- コミットメッセージはプロンプト内容から自動生成（必要に応じて手動追記も可能）
 
 ### エラー処理の方針
 - **厳格に失敗させる方針**（グレースフル・デグラデーション禁止）
@@ -405,7 +407,7 @@ claude_sessions: id, user_id, project_id, session_data
 ### 技術サポート
 - **CLAUDE.md**: 詳細な技術仕様とアーキテクチャ
 - **GitHub Issues**: バグ報告・機能要望
-- **Socket.IO デバッグ**: Claude統合の通信問題
+- **Socket.IO デバッグ**: AI CLI統合の通信問題
 
 ### 教育サポート
 - **教師向け**: 管理機能・学生プロジェクト監視
@@ -415,5 +417,5 @@ claude_sessions: id, user_id, project_id, session_data
 
 <div align="center">
   <p><strong>MindCode</strong> - 青山学院大学</p>
-  <p>Powered by Claude Code AI</p>
+  <p>Powered by AI CLI Integrations</p>
 </div>

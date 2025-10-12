@@ -2,8 +2,7 @@ const express = require('express');
 const { verifyToken, isTeacher } = require('../middleware/auth');
 const db = require('../database/connection');
 const fs = require('fs').promises;
-const path = require('path');
-const { serveProjectAsset } = require('../utils/projectPreviewUtils');
+const { getProjectPath } = require('../utils/userWorkspace');
 
 const router = express.Router();
 
@@ -67,72 +66,6 @@ router.get('/users/:userId/projects', verifyToken, isTeacher, async (req, res) =
   }
 });
 
-// Get project preview URL for teacher viewing (teachers only)
-router.get('/projects/:projectId/preview', verifyToken, isTeacher, async (req, res) => {
-  try {
-    const [projects] = await db.execute(`
-      SELECT p.*, u.id as user_id, u.name as user_name 
-      FROM projects p 
-      JOIN users u ON p.user_id = u.id 
-      WHERE p.id = ?
-    `, [req.params.projectId]);
-
-    if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found' });
-    }
-
-    const project = projects[0];
-    const previewUrl = `/api/admin/projects/${project.id}/live`;
-    
-    res.json({
-      project,
-      previewUrl,
-      message: 'Project preview available'
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Error getting project preview' });
-  }
-});
-
-const handleProjectAssetRequest = async (req, res) => {
-  try {
-    const projectId = req.params.projectId;
-    const requestedPath = req.params[0] || 'index.html';
-
-    // Load project and owner to resolve filesystem path
-    const [projects] = await db.execute(`
-      SELECT p.*, u.id as user_id 
-      FROM projects p 
-      JOIN users u ON p.user_id = u.id 
-      WHERE p.id = ?
-    `, [projectId]);
-
-    if (projects.length === 0) {
-      return res.status(404).send('<h1>Project not found</h1>');
-    }
-
-    const project = projects[0];
-    const projectRoot = path.join(__dirname, '../../user_projects', project.user_id.toString(), projectId);
-
-    await serveProjectAsset({
-      projectRoot,
-      requestedPath,
-      projectId,
-      token: req.query.token,
-      res,
-      db,
-      baseHref: `${req.baseUrl}/projects/${projectId}/live/`
-    });
-  } catch (error) {
-    console.error('Error serving project preview:', error);
-    res.status(500).send('<h1>Error loading project</h1>');
-  }
-};
-
-// Serve live project preview and assets (teachers only)
-router.get('/projects/:projectId/live', handleProjectAssetRequest);
-router.get('/projects/:projectId/live/*', handleProjectAssetRequest);
-
 // Get project files for teacher viewing (teachers only)
 router.get('/projects/:projectId/files', verifyToken, isTeacher, async (req, res) => {
   try {
@@ -165,7 +98,7 @@ router.get('/projects/:projectId/claude-prompts', verifyToken, isTeacher, async 
     const project = projects[0];
 
     const [logs] = await db.execute(`
-      SELECT cpl.id, cpl.prompt, cpl.created_at, cpl.user_id,
+      SELECT cpl.id, cpl.prompt, cpl.duration_ms, cpl.created_at, cpl.user_id,
              u.name AS user_name, u.email AS user_email
       FROM claude_prompt_logs cpl
       JOIN users u ON cpl.user_id = u.id
@@ -190,7 +123,7 @@ router.delete('/projects/:id', verifyToken, isTeacher, async (req, res) => {
     
     // Get project details including user info
     const [projects] = await db.execute(`
-      SELECT p.*, u.id as user_id, u.name as user_name 
+      SELECT p.*, u.id as user_id, u.name as user_name, u.email as user_email 
       FROM projects p 
       JOIN users u ON p.user_id = u.id 
       WHERE p.id = ?
@@ -201,14 +134,13 @@ router.delete('/projects/:id', verifyToken, isTeacher, async (req, res) => {
     }
 
     const project = projects[0];
+    const owner = { id: project.user_id, email: project.user_email };
+    const projectPath = getProjectPath(owner, projectId);
 
-    // Delete project directory
-    const projectPath = path.join(__dirname, '../../user_projects', project.user_id.toString(), projectId);
     try {
       await fs.rm(projectPath, { recursive: true, force: true });
     } catch (error) {
-      console.warn(`Could not delete project directory: ${error.message}`);
-      // Continue with database deletion even if file deletion fails
+      console.warn(`Could not delete project directory at ${projectPath}: ${error.message}`);
     }
 
     // Delete from database (CASCADE will handle related records)

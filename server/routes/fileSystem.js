@@ -5,7 +5,9 @@ const fs = require('fs').promises;
 const path = require('path');
 const multer = require('multer');
 const GitManager = require('../utils/gitManager');
+// const SnapshotManager = require('../utils/snapshotManager');
 const crypto = require('crypto');
+const { resolveExistingProjectPath } = require('../utils/userWorkspace');
 
 const router = express.Router();
 const { emitFileTreeUpdate } = require('../sockets/fileTreeEvents');
@@ -13,7 +15,7 @@ const { emitFileTreeUpdate } = require('../sockets/fileTreeEvents');
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: async (req, file, cb) => {
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), req.params.projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId);
     await fs.mkdir(projectPath, { recursive: true });
     cb(null, projectPath);
   },
@@ -110,21 +112,36 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
     }
 
     // パス構築：filePathの扱いを修正
+    const trimmedFilePath = filePath ? filePath.trim() : '';
     let relativeFilePath;
-    if (filePath && filePath.trim()) {
-      // filePathが既にfileNameを含む完全パスかチェック
-      if (filePath.endsWith(fileName)) {
-        // 既に完全パス（既存ファイルの更新）
-        relativeFilePath = filePath;
+
+    if (trimmedFilePath) {
+      const normalizedFilePath = trimmedFilePath.replace(/\\/g, '/');
+
+      let shouldTreatAsFullPath = false;
+      if (normalizedFilePath.endsWith(`/${fileName}`) || normalizedFilePath === fileName) {
+        const [existingPathRecords] = await db.execute(
+          'SELECT file_type FROM project_files WHERE project_id = ? AND file_path = ?',
+          [projectId, normalizedFilePath]
+        );
+
+        if (existingPathRecords.length > 0 && existingPathRecords[0].file_type !== 'folder') {
+          shouldTreatAsFullPath = true;
+        }
+      }
+
+      if (shouldTreatAsFullPath) {
+        relativeFilePath = normalizedFilePath;
       } else {
-        // 親ディレクトリのみ（新規ファイル作成）
-        relativeFilePath = path.join(filePath, fileName);
+        relativeFilePath = normalizedFilePath ? path.posix.join(normalizedFilePath, fileName) : fileName;
       }
     } else {
-      // filePathがない場合（ルートディレクトリ）
       relativeFilePath = fileName;
     }
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+
+    // Normalize path to posix-style for DB consistency
+    relativeFilePath = relativeFilePath.replace(/\\/g, '/');
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
     const fullFilePath = path.join(projectPath, relativeFilePath);
 
     if (isFolder) {
@@ -239,6 +256,10 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
       });
     }
 
+    // スナップショット機能は一時的に無効化
+    // const createSnapshot = req.body.createSnapshot || req.query.createSnapshot;
+    let snapshotInfo = null;
+
     res.status(isUpdate ? 200 : 201).json({
       id: fileId,
       filePath: relativeFilePath,
@@ -247,7 +268,8 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
       checksum,
       fileType,
       isUpdate,
-      isFolder: false
+      isFolder: false,
+      snapshot: snapshotInfo
     });
 
   } catch (error) {
@@ -258,6 +280,9 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
     });
   }
 });
+
+// プロジェクト保存エンドポイントは一時的に無効化（スナップショット機能と一緒に）
+// router.post('/:projectId/save', verifyToken, async (req, res) => { ... });
 
 // GET /api/filesystem/:projectId/files/:fileId - Get file content and metadata
 router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
@@ -299,7 +324,7 @@ router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
       const versionRecord = versions.find(v => v.version_number == version);
       if (versionRecord && versionRecord.git_commit_hash) {
         try {
-          const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+          const projectPath = await resolveExistingProjectPath(req.user, projectId);
           const gitManager = new GitManager(projectPath);
           const historicalContent = await gitManager.getFileAtCommit(file.file_path, versionRecord.git_commit_hash);
           if (historicalContent !== null) {
@@ -349,7 +374,7 @@ router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
     }
 
     const file = files[0];
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
     const fullFilePath = path.join(projectPath, file.file_path);
 
     // フォルダの場合、中身を再帰的に削除する必要がある
@@ -458,7 +483,7 @@ router.post('/:projectId/move', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
     const sourceRelativePath = sourcePath.replace(/^\/+/, '');
     const destinationFolderPath = destinationPath.replace(/^\/+/, '').replace(/\/+$/, '');
 
@@ -572,7 +597,24 @@ router.post('/:projectId/move', verifyToken, async (req, res) => {
 router.get('/:projectId/tree', verifyToken, async (req, res) => {
   try {
     const { projectId } = req.params;
-    
+    const { sync } = req.query; // ?sync=true で同期を実行
+
+    // 同期オプションが指定されている場合、物理ファイルとDBを同期
+    if (sync === 'true') {
+      try {
+        const GitManager = require('../utils/gitManager');
+        const projectPath = await resolveExistingProjectPath(req.user, projectId);
+        const gitManager = new GitManager(projectPath);
+
+        console.log(`[SYNC] Manual sync requested for project ${projectId}`);
+        const syncResult = await gitManager.syncPhysicalFilesWithDatabase(projectId, req.user.id, db);
+        console.log(`[SYNC] Manual sync completed: ${syncResult.fileCount} files, ${syncResult.folderCount} folders`);
+      } catch (syncError) {
+        console.error('Manual sync failed:', syncError);
+        // 同期失敗してもファイルツリー取得は続行
+      }
+    }
+
     // Get all files with metadata
     const [files] = await db.execute(`
       SELECT pf.*, 
@@ -675,7 +717,7 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
     }
 
     const uploadedFiles = [];
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
 
     for (const file of req.files) {
       try {
@@ -768,7 +810,7 @@ router.patch('/:projectId/files/:fileId/rename', verifyToken, async (req, res) =
     }
 
     const file = files[0];
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
     const oldFilePath = path.join(projectPath, file.file_path);
     
     // Calculate new paths
@@ -845,7 +887,7 @@ router.post('/:projectId/sync', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
     
     
     // Get existing files from database

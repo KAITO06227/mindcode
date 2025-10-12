@@ -5,6 +5,11 @@ const fs = require('fs').promises;
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { serveProjectAsset } = require('../utils/projectPreviewUtils');
+const {
+  ensureProjectPath,
+  resolveExistingProjectPath,
+  getProjectPath
+} = require('../utils/userWorkspace');
 const router = express.Router();
 
 // Get user projects
@@ -32,8 +37,7 @@ router.post('/', verifyToken, async (req, res) => {
     );
 
     // Create project directory structure
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
-    await fs.mkdir(projectPath, { recursive: true });
+    const projectPath = await ensureProjectPath(req.user, projectId);
 
     // Create initial files
     const indexHtml = `<!DOCTYPE html>
@@ -62,40 +66,66 @@ h1 {
     text-align: center;
 }`;
 
-    const indexJs = `// Your JavaScript code here
-console.log('Welcome to ${name}!');`;
+    const indexJs = `// Customize your project "${name}" here\n`;
 
-    const claudeMd = [
-      `# ${name}`,
+    const aiSharedGuide = [
+      '# MindCode AI 協調ガイド',
       '',
-      'このプロジェクトは MindCode で作成されました。Claude Code に関する注意点:',
+      'このファイルは複数の AI エージェントが共通で参照する指示書です。',
       '',
-      '- Claude CLI を利用する場合は、ターミナルで `claude` コマンドを実行します。',
-      '- 重要な変更前後に自動コミットが実行されます。',
-      '- Claude に送信するプロンプトは教育目的で保存される可能性があります。',
+      '## 共通原則',
+      '- 作業開始前に現在の課題と目的を整理し、必要であればここにメモを残すこと',
+      '- 変更内容は簡潔に記録し、他のエージェントが状況を把握できるようにすること',
+      '- 競合する提案がある場合は、優先度と根拠を明示して調整案を提示すること',
       '',
-      '## フォルダ構成',
+      '## 実装手順の共有',
+      '- ファイル構成や重要な設定が変わる場合は、このファイルに追記して共有してください',
+      '- 追加の指示や注意事項があれば、箇条書きで分かりやすくまとめてください',
       '',
-      '- `index.html`',
-      '- `style.css`',
-      '- `script.js`',
-      '',
-      '必要に応じて内容を更新してください。'
+      '## レビューと検証',
+      '- 可能であれば、テスト手順や確認方法を記載し、他のエージェントも同じ手順を再利用できるようにしてください',
+      '- 完了報告の際は、何を実施し、未完了のタスクがあるかどうかを明示してください'
     ].join('\n');
+
+    const buildAgentPrompt = (agentLabel) => [
+      `# ${agentLabel} Agent ワークフロー`,
+      '',
+      'プロジェクトルートの `AI.md` を読み込み、共通指示を反映しながら対応してください。',
+      '',
+      '## 行動ガイドライン',
+      '- `AI.md` に記載された原則を優先して判断すること',
+      '- 作業内容や決定事項があれば `AI.md` へ追記し、他エージェントと共有すること',
+      '- 必要に応じて補助的なメモや TODO を `AI.md` に残してください'
+    ].join('\n');
+
+    const hiddenAgentFiles = [
+      { filePath: '.mindcode/CLAUDE.md', content: buildAgentPrompt('Claude'), type: 'markdown', isHidden: true },
+      { filePath: '.mindcode/AGENTS.md', content: buildAgentPrompt('Agents'), type: 'markdown', isHidden: true },
+      { filePath: '.mindcode/GEMINI.md', content: buildAgentPrompt('Gemini'), type: 'markdown', isHidden: true }
+    ];
+
+    const gitignore = ['node_modules/', '.env', '.config/', '.backup/', '.mindcode/', '.codex/', '.gemini/'].join('\n');
+
+    const filesToCreate = [
+      { filePath: 'index.html', content: indexHtml, type: 'html' },
+      { filePath: 'style.css', content: indexCss, type: 'css' },
+      { filePath: 'script.js', content: indexJs, type: 'javascript' },
+      { filePath: 'AI.md', content: aiSharedGuide, type: 'markdown' },
+      ...hiddenAgentFiles,
+      { filePath: '.gitignore', content: gitignore, type: 'text', isHidden: true }
+    ];
 
     // Write files to disk
     try {
       await fs.mkdir(projectPath, { recursive: true });
 
-      // Create initial files
-      await fs.writeFile(path.join(projectPath, 'index.html'), indexHtml);
-
-      await fs.writeFile(path.join(projectPath, 'style.css'), indexCss);
-      
-      await fs.writeFile(path.join(projectPath, 'script.js'), indexJs);
-
-      await fs.writeFile(path.join(projectPath, 'CLAUDE.md'), claudeMd);
-      
+      for (const file of filesToCreate) {
+        const relativeDir = path.dirname(file.filePath);
+        if (relativeDir && relativeDir !== '.') {
+          await fs.mkdir(path.join(projectPath, relativeDir), { recursive: true });
+        }
+        await fs.writeFile(path.join(projectPath, file.filePath), file.content);
+      }
     } catch (fileError) {
       console.error('Error creating files:', fileError);
       console.error('Error details:', {
@@ -107,61 +137,20 @@ console.log('Welcome to ${name}!');`;
       throw new Error(`Failed to create project files: ${fileError.message}`);
     }
 
-    // Initialize filesystem records for created files
-    const crypto = require('crypto');
-    const calculateChecksum = (content) => crypto.createHash('sha256').update(content).digest('hex');
-    
-    const initialFiles = [
-      { name: 'index.html', content: indexHtml, type: 'html' },
-      { name: 'style.css', content: indexCss, type: 'css' },
-      { name: 'script.js', content: indexJs, type: 'javascript' },
-      { name: 'CLAUDE.md', content: claudeMd, type: 'markdown' }
-    ];
-
+    // データベースの既存ファイルレコードとバージョン履歴をクリア（プロジェクト再作成の場合）
     try {
-      // Clean up existing files for this project first (in case of retry)
-      // file_versions will be deleted automatically due to CASCADE constraint
+      // 明示的にfile_versionsから削除
+      await db.execute(`
+        DELETE fv FROM file_versions fv
+        INNER JOIN project_files pf ON fv.file_id = pf.id
+        WHERE pf.project_id = ?`, [projectId]);
+
+      // project_filesから削除
       await db.execute('DELETE FROM project_files WHERE project_id = ?', [projectId]);
 
-      for (const file of initialFiles) {
-        // Try new database structure first, fallback to old structure
-        try {
-          const checksum = calculateChecksum(file.content);
-          const fileSize = Buffer.byteLength(file.content, 'utf8');
-          
-          // Try new filesystem database structure
-          const [result] = await db.execute(`
-            INSERT INTO project_files 
-            (project_id, file_path, file_name, content, file_type, file_size, 
-             permissions, checksum, is_binary, created_by, updated_by) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [projectId, file.name, file.name, file.content, file.type, fileSize, 
-             'rw-r--r--', checksum, false, req.user.id, req.user.id]
-          );
-
-          const fileId = result.insertId;
-          
-          // Create initial version record
-          await db.execute(`
-            INSERT INTO file_versions 
-            (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
-            VALUES (?, 1, ?, ?, 'create', 'Initial file creation', ?)`,
-            [fileId, fileSize, checksum, req.user.id]
-          );
-          
-        } catch (newStructureError) {
-          
-          // Fallback to old database structure
-          await db.execute(
-            'INSERT INTO project_files (project_id, file_path, file_name, content, file_type) VALUES (?, ?, ?, ?, ?)',
-            [projectId, file.name, file.name, file.content, file.type]
-          );
-        }
-      }
-    } catch (dbError) {
-      console.error('Error saving files to database:', dbError);
-      // Don't fail project creation if database save fails - files exist on disk
-      console.warn('Files created on disk but database save failed - will be synced on first access');
+      console.log(`[PROJECT] Cleared existing file records and versions for project ${projectId}`);
+    } catch (cleanupError) {
+      console.warn('Could not clean up existing file records:', cleanupError.message);
     }
 
     const [newProject] = await db.execute('SELECT * FROM projects WHERE id = ?', [projectId]);
@@ -171,7 +160,7 @@ console.log('Welcome to ${name}!');`;
       return res.status(500).json({ message: 'Project created but could not be retrieved' });
     }
     
-    // Git初期化をプロジェクト作成時に実行
+    // トリップコード初期化をプロジェクト作成時に実行
     try {
       const GitManager = require('../utils/gitManager');
       const gitManager = new GitManager(projectPath);
@@ -182,17 +171,27 @@ console.log('Welcome to ${name}!');`;
       await db.execute(`
         INSERT INTO git_repositories (project_id, is_initialized, git_user_name, git_user_email, current_branch)
         VALUES (?, TRUE, ?, ?, 'main')
-        ON DUPLICATE KEY UPDATE 
-        is_initialized = TRUE, 
+        ON DUPLICATE KEY UPDATE
+        is_initialized = TRUE,
         git_user_name = VALUES(git_user_name),
         git_user_email = VALUES(git_user_email),
         current_branch = 'main'`,
         [projectId, req.user.name, req.user.email]
       );
+
+      // 物理ファイルとデータベースを同期
+      try {
+        console.log(`[PROJECT] Syncing files after project creation...`);
+        const syncResult = await gitManager.syncPhysicalFilesWithDatabase(projectId, req.user.id, db);
+        console.log(`[PROJECT] Sync completed: ${syncResult.fileCount} files, ${syncResult.folderCount} folders`);
+      } catch (syncError) {
+        console.error('File sync failed after project creation:', syncError);
+        // 同期失敗もプロジェクト作成は成功とする
+      }
       
     } catch (gitError) {
-      console.error('Git initialization failed during project creation:', gitError);
-      // Git初期化が失敗してもプロジェクト作成は成功とする
+      console.error('Tripcode initialization failed during project creation:', gitError);
+      // トリップコード初期化が失敗してもプロジェクト作成は成功とする
     }
     
     res.status(201).json(newProject[0]);
@@ -221,7 +220,7 @@ router.get('/:id', verifyToken, async (req, res) => {
 
     const project = projects[0];
     
-    // Git初期化は別途Git APIで実行するため、ここでは処理しない
+    // トリップコード初期化は別途APIで実行するため、ここでは処理しない
 
     res.json(project);
   } catch (error) {
@@ -266,12 +265,11 @@ router.delete('/:id', verifyToken, async (req, res) => {
     }
 
     // Delete project directory
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = getProjectPath(req.user, projectId);
     try {
       await fs.rm(projectPath, { recursive: true, force: true });
     } catch (error) {
-      console.warn(`Could not delete project directory: ${error.message}`);
-      // Continue with database deletion even if file deletion fails
+      console.warn(`Could not delete project directory at ${projectPath}: ${error.message}`);
     }
 
     // Delete from database (CASCADE will handle related records)
@@ -304,7 +302,7 @@ const handleLiveAssetRequest = async (req, res) => {
     const requestedPath = req.params[0] || 'index.html';
 
     const [projects] = await db.execute(
-      'SELECT p.*, u.id as user_id FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      'SELECT p.*, u.id as user_id, u.email as user_email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
       [projectId]
     );
 
@@ -312,12 +310,12 @@ const handleLiveAssetRequest = async (req, res) => {
       return res.status(404).send('<h1>Project not found</h1>');
     }
 
-    const projectRoot = path.join(
-      __dirname,
-      '../../user_projects',
-      projects[0].user_id.toString(),
-      projectId
-    );
+    const owner = {
+      id: projects[0].user_id,
+      email: projects[0].user_email
+    };
+
+    const projectRoot = await resolveExistingProjectPath(owner, projectId);
 
     await serveProjectAsset({
       projectRoot,

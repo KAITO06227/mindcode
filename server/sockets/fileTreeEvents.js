@@ -37,11 +37,6 @@ function initFileTreeEvents(io) {
 
     const roomId = `${userId}:${projectId}`;
     socket.join(roomId);
-    console.log(`file-events: client ${socket.id} joined room ${roomId}`);
-
-    socket.on('disconnect', () => {
-      console.log(`file-events: client ${socket.id} disconnected from room ${roomId}`);
-    });
   });
 }
 

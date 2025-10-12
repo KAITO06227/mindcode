@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS claude_prompt_logs (
   project_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,
   prompt TEXT NOT NULL,
+  duration_ms INTEGER,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE

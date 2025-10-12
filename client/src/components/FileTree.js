@@ -124,11 +124,31 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       }
     };
 
+    // Gitイベントとファイルイベントのリスナーを追加
+    const handleGitUpdate = () => {
+      console.log('[FileTree] Git update event received, refreshing...');
+      if (onTreeUpdate) {
+        onTreeUpdate();
+      }
+    };
+
+    const handleFilesUpdate = () => {
+      console.log('[FileTree] Files update event received, refreshing...');
+      if (onTreeUpdate) {
+        onTreeUpdate();
+      }
+    };
+
+    window.addEventListener('mindcode:gitUpdated', handleGitUpdate);
+    window.addEventListener('mindcode:filesUpdated', handleFilesUpdate);
+
     // Cleanup on unmount
     return () => {
       if (window.refreshFileTree) {
         delete window.refreshFileTree;
       }
+      window.removeEventListener('mindcode:gitUpdated', handleGitUpdate);
+      window.removeEventListener('mindcode:filesUpdated', handleFilesUpdate);
     };
   }, [onTreeUpdate]);
 
@@ -203,16 +223,21 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
 
   const handleCreateFile = async () => {
     try {
-      const fileName = prompt('ファイル名を入力してください:');
-      if (!fileName) return;
+      const input = prompt('ファイル名を入力してください:');
+      if (!input) return;
+
+      const fileName = input.trim();
+      if (!fileName) {
+        alert('ファイル名が空です');
+        return;
+      }
 
       const targetPath = getTargetPath();
 
       await axios.post(`/api/filesystem/${projectId}/files`, {
         fileName,
         filePath: targetPath,
-        content: '',
-        fileType: getFileType(fileName)
+        content: ''
       });
 
       onTreeUpdate();
@@ -534,19 +559,6 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       console.error('Error syncing filesystem:', error);
       alert('ファイルシステムの同期に失敗しました');
     }
-  };
-
-  const getFileType = (fileName) => {
-    const extension = fileName.split('.').pop()?.toLowerCase();
-    const typeMap = {
-      'js': 'javascript',
-      'html': 'html',
-      'css': 'css',
-      'json': 'json',
-      'md': 'markdown',
-      'txt': 'text'
-    };
-    return typeMap[extension] || 'text';
   };
 
   const renderTreeItem = (item, depth = 0, parentPath = '') => {

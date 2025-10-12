@@ -40,6 +40,9 @@ const claudeRoutes = require('./routes/claude');
 const adminRoutes = require('./routes/admin');
 const fileSystemRoutes = require('./routes/fileSystem');
 const versionControlRoutes = require('./routes/versionControl');
+// const snapshotRoutes = require('./routes/snapshots');
+const userSettingsRoutes = require('./routes/userSettings');
+const userProjectStaticRoutes = require('./routes/userProjectStatic');
 const { initFileTreeEvents } = require('./sockets/fileTreeEvents');
 
 app.use('/api/auth', authRoutes);
@@ -48,6 +51,9 @@ app.use('/api/claude', claudeRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/filesystem', fileSystemRoutes); // New filesystem API
 app.use('/api/version-control', versionControlRoutes); // New Git API
+// app.use('/api/snapshots', snapshotRoutes); // Snapshot management API (temporarily disabled)
+app.use('/api/user-settings', userSettingsRoutes);
+app.use('/user_projects', userProjectStaticRoutes);
 
 // Initialize Socket.IO for terminal sessions (using fallback without node-pty)
 const claudeSocket = require('./sockets/claudeSocketSimple');
@@ -67,9 +73,6 @@ app.use((error, req, res, next) => {
   res.status(500).json({ message: 'Internal server error' });
 });
 
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Socket.IO enabled for Claude Terminal`);
-});
+server.listen(PORT);
 
 module.exports = app;

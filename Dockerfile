@@ -1,4 +1,4 @@
-FROM node:18-alpine
+FROM node:22-alpine
 
 # Install build dependencies for node-pty
 RUN apk update && apk add --no-cache \
@@ -31,8 +31,11 @@ RUN npm install
 # Rebuild node-pty for Alpine Linux
 RUN npm rebuild node-pty || echo "node-pty rebuild completed with warnings"
 
-# Install Claude CLI globally
-RUN npm install -g @anthropic-ai/claude-code
+# Install AI CLI tools globally
+RUN npm install -g \
+    @anthropic-ai/claude-code \
+    @openai/codex \
+    @google/gemini-cli
 
 # Create client directory and install client dependencies
 RUN mkdir client

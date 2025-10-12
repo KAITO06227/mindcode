@@ -1,18 +1,56 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import io from 'socket.io-client';
 import axios from 'axios';
 import '@xterm/xterm/css/xterm.css';
+import './ClaudeTerminal.css';
 
-const ClaudeTerminal = ({ projectId, userToken }) => {
+const PROVIDER_OPTIONS = [
+  { value: 'claude', label: 'Claude Code' },
+  { value: 'codex', label: 'OpenAI Codex' },
+  { value: 'gemini', label: 'Google Gemini' }
+];
+
+const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
+  const [selectedProvider, setSelectedProvider] = useState(() => {
+    if (typeof window === 'undefined') {
+      return 'claude';
+    }
+    return localStorage.getItem('mindcode-ai-cli-provider') || 'claude';
+  });
+
   const terminalRef = useRef(null);
   const terminalInstanceRef = useRef(null);
   const fitAddonRef = useRef(null);
   const socketRef = useRef(null);
   // Track command activity without retriggering effect
-  const claudeCommandActiveRef = useRef(false);
+  const cliCommandActiveRef = useRef(false);
+  // Store callback ref to avoid effect re-trigger
+  const onCommitNotificationRef = useRef(onCommitNotification);
+
+  // Update callback ref when it changes
+  useEffect(() => {
+    onCommitNotificationRef.current = onCommitNotification;
+  }, [onCommitNotification]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    try {
+      localStorage.setItem('mindcode-ai-cli-provider', selectedProvider);
+    } catch (error) {
+      console.warn('Failed to persist AI CLI provider selection:', error);
+    }
+  }, [selectedProvider]);
+
+  const handleProviderChange = (event) => {
+    const nextProvider = event.target.value;
+    const isValid = PROVIDER_OPTIONS.some((option) => option.value === nextProvider);
+    setSelectedProvider(isValid ? nextProvider : 'claude');
+  };
 
 
   // Initialize terminal and socket connection
@@ -21,6 +59,8 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
       console.error('ProjectId or userToken missing');
       return;
     }
+
+    const providerMeta = PROVIDER_OPTIONS.find((option) => option.value === selectedProvider) || PROVIDER_OPTIONS[0];
 
     // Initialize xterm.js terminal
     const terminal = new Terminal({
@@ -64,20 +104,52 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
     
     fitAddonRef.current = fitAddon;
     terminalInstanceRef.current = terminal;
+    cliCommandActiveRef.current = false;
 
     // Open terminal in DOM
-    if (terminalRef.current) {
-      terminal.open(terminalRef.current);
-      setTimeout(() => fitAddon.fit(), 100);
+    const runFit = (context = 'fit') => {
+      const host = terminalRef.current;
+      const fitAddon = fitAddonRef.current;
+
+      if (!host || !fitAddon) {
+        return;
+      }
+
+      const { offsetWidth, offsetHeight } = host;
+      if (!offsetWidth || !offsetHeight) {
+        return;
+      }
+
+      try {
+        fitAddon.fit();
+      } catch (error) {
+        console.warn('[ClaudeTerminal] fitAddon.fit() failed', {
+          context,
+          error: error?.message || error
+        });
+      }
+    };
+
+    const scheduleFit = (context = 'fit') => {
+      if (typeof window === 'undefined') {
+        return;
+      }
+      window.requestAnimationFrame(() => runFit(context));
+    };
+
+    const hostElement = terminalRef.current;
+
+    if (hostElement) {
+      terminal.open(hostElement);
+      scheduleFit('initial-mount');
     }
 
     // Initialize socket connection
     // Use different URL for development and production
     const socketUrl = process.env.NODE_ENV === 'production' ? '/' : 'http://localhost:3001';
-    console.log('Connecting to Socket.IO server:', socketUrl);
     
     const socket = io(socketUrl, {
-      query: { projectId, token: userToken },
+      query: { projectId, token: userToken, provider: selectedProvider },
       transports: ['polling', 'websocket'], // Try polling first, then websocket
       forceNew: true,
       reconnection: true,
@@ -88,23 +160,20 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
 
     // Socket event handlers
     socket.on('connect', () => {
-      console.log('✅ Socket.IO connected successfully');
       terminal.writeln('\r\n🤖 MindCode Terminal に接続しました');
       terminal.writeln('ターミナルを初期化中...\r\n');
+      terminal.writeln(`選択中の AI CLI: ${providerMeta.label}\r\n`);
 
     });
 
-    socket.on('disconnect', (reason) => {
-      console.log('❌ Socket.IO disconnected:', reason);
+    socket.on('disconnect', () => {
       terminal.writeln('\r\n\x1b[31m接続が切断されました\x1b[0m\r\n');
     });
 
-    // Auto-sync filesystem after Claude Code commands
-    const autoSyncAfterClaude = async () => {
+    // Auto-sync filesystem after AI CLI commands
+    const autoSyncAfterCli = async () => {
       try {
-        console.log('Auto-syncing filesystem after Claude Code command...');
         await axios.post(`/api/filesystem/${projectId}/sync`);
-        console.log('Auto-sync completed successfully');
         
         // Trigger file tree refresh if available
         if (window.refreshFileTree) {
@@ -119,28 +188,47 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
     socket.on('output', (data) => {
       terminal.write(data);
       
-      // Detect Claude Code command execution
       const outputText = data.toString();
-      
-      // Detect when Claude Code command starts
-      if (outputText.includes('claude') && !claudeCommandActiveRef.current) {
-        claudeCommandActiveRef.current = true;
-        console.log('Claude Code command detected, starting monitoring...');
-      }
-      
-      // Detect when Claude Code command ends (prompt returns)
-      if (claudeCommandActiveRef.current && (outputText.includes('$') || outputText.includes('>') || outputText.includes('You:'))) {
-        claudeCommandActiveRef.current = false;
-        console.log('Claude Code command completed, triggering auto-sync...');
-        
+
+      const promptDetected =
+        outputText.includes('$ ') || outputText.includes('> ') || outputText.includes('You:');
+
+      if (cliCommandActiveRef.current && promptDetected) {
+        cliCommandActiveRef.current = false;
+
         // Auto-sync after a short delay to ensure command is fully completed
-        setTimeout(autoSyncAfterClaude, 2000);
+        setTimeout(autoSyncAfterCli, 2000);
       }
     });
+
+    const handleCommitNotificationEvent = (payload) => {
+      if (typeof onCommitNotificationRef.current === 'function') {
+        onCommitNotificationRef.current(payload);
+      }
+    };
+
+    socket.on('commit_notification', handleCommitNotificationEvent);
+
+    const handleSaveComplete = (payload) => {
+      if (typeof onCommitNotificationRef.current === 'function') {
+        onCommitNotificationRef.current({
+          status: 'success',
+          provider: 'Auto Save',
+          count: (payload?.count ?? 0),
+          durationMs: null,
+          message: payload?.message || '保存が完了しました'
+        });
+      }
+    };
+
+    socket.on('save_complete', handleSaveComplete);
 
     // Handle terminal input - send directly to server like ../claude
     terminal.onData((data) => {
       socket.emit('input', data);
+      if (data.includes('\r')) {
+        cliCommandActiveRef.current = true;
+      }
     });
 
     // Handle terminal resize - like ../claude
@@ -150,41 +238,125 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
 
     // Handle window resize
     const handleResize = () => {
-      if (fitAddonRef.current && terminalInstanceRef.current) {
-        fitAddonRef.current.fit();
-      }
+      scheduleFit('window-resize');
     };
 
     window.addEventListener('resize', handleResize);
-    
-    // Initial resize
-    setTimeout(handleResize, 200);
+
+    const handleBeforeUnload = () => {
+      if (!socketRef.current) {
+        return;
+      }
+      try {
+        socketRef.current.emit('terminate_session');
+      } catch (emitError) {
+        console.warn('[ClaudeTerminal] failed to emit terminate_session on unload:', emitError);
+      }
+      try {
+        socketRef.current.disconnect();
+      } catch (disconnectError) {
+        console.warn('[ClaudeTerminal] failed to disconnect socket on unload:', disconnectError);
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    let resizeObserver;
+    if (typeof ResizeObserver !== 'undefined' && hostElement) {
+      resizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const { width, height } = entry.contentRect || {};
+          if (width > 0 && height > 0) {
+            scheduleFit('resize-observer');
+          }
+        }
+      });
+      resizeObserver.observe(hostElement);
+    }
+
+    // Initial resize after mount
+    setTimeout(() => scheduleFit('initial-resize'), 200);
 
     // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      if (resizeObserver && hostElement) {
+        resizeObserver.unobserve(hostElement);
+        resizeObserver.disconnect();
+      }
       if (socketRef.current) {
+        try {
+          socketRef.current.emit('terminate_session');
+        } catch (emitError) {
+          console.warn('[ClaudeTerminal] failed to emit terminate_session during cleanup:', emitError);
+        }
+        socketRef.current.off('commit_notification', handleCommitNotificationEvent);
+        socketRef.current.off('save_complete', handleSaveComplete);
         socketRef.current.disconnect();
+        socketRef.current = null;
       }
       if (terminalInstanceRef.current) {
         terminalInstanceRef.current.dispose();
+        terminalInstanceRef.current = null;
+      }
+      if (fitAddonRef.current) {
+        fitAddonRef.current.dispose?.();
+        fitAddonRef.current = null;
       }
     };
-  }, [projectId, userToken]);
+  }, [projectId, selectedProvider, userToken]);
 
   return (
-    <div style={{ position: 'relative', height: '100%', width: '100%' }}>
-      {/* Terminal container */}
-      <div 
-        ref={terminalRef} 
-        style={{ 
-          height: '100%', 
+    <div
+      className="claude-terminal-container"
+      style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%' }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '8px',
+          padding: '6px 12px',
+          backgroundColor: '#161b22',
+          borderBottom: '1px solid #30363d',
+          fontSize: '12px',
+          color: '#c9d1d9'
+        }}
+      >
+        <span style={{ fontWeight: 600 }}>AI CLI</span>
+        <select
+          value={selectedProvider}
+          onChange={handleProviderChange}
+          style={{
+            backgroundColor: '#0d1117',
+            color: '#e6edf3',
+            border: '1px solid #30363d',
+            borderRadius: '4px',
+            padding: '4px 8px',
+            fontSize: '12px',
+            cursor: 'pointer'
+          }}
+        >
+          {PROVIDER_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div
+        ref={terminalRef}
+        className="claude-terminal-host"
+        style={{
+          flex: 1,
           width: '100%',
           backgroundColor: '#0d1117',
           padding: '8px',
           paddingBottom: '16px',
           boxSizing: 'border-box'
-        }} 
+        }}
       />
     </div>
   );

@@ -128,7 +128,7 @@ const LoginPage = () => {
         <Features>
           <Feature>シンタックスハイライト付きモナコエディタ</Feature>
           <Feature>ライブプレビュー機能</Feature>
-          <Feature>Git統合バージョン管理</Feature>
+          <Feature>トリップコード統合バージョン管理</Feature>
           <Feature>Claude Code AI支援</Feature>
           <Feature>ファイル・フォルダ管理</Feature>
           <Feature>教師用管理パネル</Feature>

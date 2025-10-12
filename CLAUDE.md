@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. Other AI agents (Codex / Gemini) also reference the shared instructions in `AI.md` and `.mindcode/`.
 
 ## プロジェクト概要
 **MindCode**は青山学院大学の学生・教職員向けに開発された教育用Web開発統合開発環境（IDE）です。
@@ -8,14 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **重要事項：**
 - **対象ユーザー**: 日本人学生・教職員（@gsuite.si.aoyama.ac.jpドメイン限定）
 - **言語**: すべてのUI、エラーメッセージ、コミュニケーションは日本語
-- **Claude Codeとの対話**: 日本語で行う
+- **Claude / Codex / Gemini との対話**: すべて日本語で行う
 - フロントエンド: React (Create React App, ポート3000)
 - バックエンド: Node.js + Express (ポート3001) 
 - データベース: MySQL (ポート3306)
 - 認証: Google OAuth
 - エディタ: Monaco Editor
-- AI支援: Claude Code統合 (Socket.IO)
-- バージョン管理: Git統合
+- AI支援: マルチAI CLI統合 (Claude / Codex / Gemini)
+- バージョン管理: トリップコード（Git基盤）統合
 - 開発プロキシ: クライアント → `http://localhost:3001`
 
 ## プロジェクト構造
@@ -59,15 +59,16 @@ mindcode/
 - HTML/CSS/JavaScript対応
 
 ### ライブプレビュー
-- スモールブラウザ機能（pikeplaceを参考）
-- リアルタイムプレビュー
+- IDEから別タブで開くライブプレビューボタンを提供
+- `/api/projects/:id/live` エンドポイント経由で最新状態を表示
 
-### Claude Code統合
-- xterm.jsを使用したターミナル
-- プロンプト送信前の自動Git コミット・プッシュ
-- コード生成支援
+### AI CLI統合（Claude / Codex / Gemini）
+- xterm.jsを使用した共通ターミナル
+- `AI.md` と `.mindcode/` のガイドファイルを読み込み、複数エージェントで共有
+- プロンプト終了時にトリップコードへ自動コミット
+- コード生成・分析支援
 
-### Git機能
+### トリップコード（Git）機能
 - リポジトリの初期化
 - コミット、プッシュ、プル
 - ブランチ管理
@@ -108,8 +109,8 @@ mindcode/
 - POST /:projectId/upload - ファイルアップロード
 
 ### Version Control (/api/version-control)
-- POST /:projectId/init - Git初期化
-- GET /:projectId/status - Git状況取得
+- POST /:projectId/init - トリップコード初期化
+- GET /:projectId/status - トリップコード状況取得
 - POST /:projectId/commit - コミット作成
 - GET /:projectId/history - コミット履歴取得
 - GET /:projectId/branches - ブランチ一覧取得
@@ -126,9 +127,9 @@ mindcode/
 - POST /:projectId/upload - 複数ファイルアップロード
 - PATCH /:projectId/files/:fileId/rename - ファイルリネーム
 
-### Claude Code (/api/claude)
-- POST /execute/:projectId - Claude Codeコマンド実行
-- POST /session/:projectId - インタラクティブセッション開始
+### AI CLI (/api/claude)
+- POST /execute/:projectId - CLIコマンド実行（provider指定でClaude/Codex/Geminiを選択）
+- POST /session/:projectId - インタラクティブセッション開始（デフォルトはClaude Code）
 
 ### 管理 (/api/admin)
 - GET /users - ユーザー一覧取得
@@ -147,7 +148,7 @@ mindcode/
 
 1. **物理ファイルシステム** (`user_projects/[userId]/[projectId]/`)
    - 実際のファイルが保存される場所
-   - Git操作の対象
+   - トリップコード（Git）操作の対象
    - Monaco Editorが直接読み込む
 
 2. **データベースファイルシステム** (拡張project_files テーブル)
@@ -155,9 +156,9 @@ mindcode/
    - アクセスログとバージョン履歴
    - 検索とインデックス機能
 
-### Git統合戦略
+### トリップコード統合戦略
 - `GitManager`クラス（`server/utils/gitManager.js`）が物理ファイルの Git 操作を担当
-- データベース内の`file_versions`テーブルがGitコミットハッシュと連携
+- データベース内の`file_versions`テーブルがコミットハッシュと連携
 - エラー処理は厳格モード：失敗時は操作を中止（グレースフル・デグラデーション無し）
 
 ### API設計パターン
@@ -255,7 +256,6 @@ docker-compose exec db mysql -u root -ppassword webide < /docker-entrypoint-init
 
 ### pikeplace参考箇所
 - Google OAuth実装: `pikeplace/auth/`
-- スモールブラウザ機能: `pikeplace/static/kenya.html` の124行目周辺のiframe実装
 - Monaco Editorの使用方法: `pikeplace/static/lib/monaco-editor/`
 
 ### Claude Code統合の仕様
@@ -313,10 +313,9 @@ Claude Code統合はWebSocketベースの`claudeSocket.js`で実装：
 **主要React コンポーネント**:
 - `LoginPage`: Google OAuth認証
 - `DashboardPage`: プロジェクト一覧・作成
-- `IDEPage`: メインIDE画面
+- `IDEPage`: メインIDE画面（プレビューボタンを含む）
 - `FileTree`: ファイル管理（CRUD、アップロード対応）
 - `GitPanel`: バージョン管理GUI  
-- `SmallBrowser`: HTML/CSS/JSプレビュー
 - `ClaudeCodeTerminal`: xterm.jsベースのClaude統合ターミナル
 - `AdminPage`: 教師用管理機能
 

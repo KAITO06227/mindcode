@@ -37,6 +37,67 @@ async function getOrCreateGitRepo(projectId, userId) {
   }
 }
 
+/**
+ * 物理ファイルシステムとデータベースを同期
+ */
+async function syncDatabaseWithFilesystem(projectId, projectPath, userId) {
+  const crypto = require('crypto');
+
+  // 既存のデータベースレコードを削除
+  await db.execute('DELETE FROM project_files WHERE project_id = ?', [projectId]);
+
+  let fileCount = 0;
+  let folderCount = 0;
+
+  // 物理ファイルを再帰的にスキャン
+  async function scanDirectory(dirPath, relativePath = '') {
+    const items = await fs.readdir(dirPath, { withFileTypes: true });
+
+    for (const item of items) {
+      if (item.name.startsWith('.')) continue; // .git, .gitignore等をスキップ
+
+      const fullPath = path.join(dirPath, item.name);
+      const relativeFilePath = relativePath ? path.posix.join(relativePath, item.name) : item.name;
+
+      if (item.isDirectory()) {
+        // フォルダをデータベースに登録
+        await db.execute(`
+          INSERT INTO project_files
+          (project_id, file_path, file_name, content, file_type, file_size,
+           permissions, checksum, is_binary, created_by, updated_by)
+          VALUES (?, ?, ?, '', 'folder', 0, 'rwxr-xr-x', '', false, ?, ?)`,
+          [projectId, relativeFilePath, item.name, userId, userId]
+        );
+        folderCount++;
+
+        // 再帰的にスキャン
+        await scanDirectory(fullPath, relativeFilePath);
+      } else if (item.isFile()) {
+        // ファイル内容を読み取り
+        const content = await fs.readFile(fullPath, 'utf8');
+        const fileSize = Buffer.byteLength(content, 'utf8');
+        const checksum = crypto.createHash('sha256').update(content).digest('hex');
+        const fileType = path.extname(item.name).slice(1) || 'text';
+
+        // ファイルをデータベースに登録
+        await db.execute(`
+          INSERT INTO project_files
+          (project_id, file_path, file_name, content, file_type, file_size,
+           checksum, is_binary, created_by, updated_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [projectId, relativeFilePath, item.name, content, fileType, fileSize,
+           checksum, false, userId, userId]
+        );
+        fileCount++;
+      }
+    }
+  }
+
+  await scanDirectory(projectPath);
+
+  return { fileCount, folderCount };
+}
+
 // POST /api/version-control/:projectId/init - Initialize Tripcode repository
 router.post('/:projectId/init', verifyToken, async (req, res) => {
   try {
@@ -126,7 +187,8 @@ router.get('/:projectId/status', verifyToken, async (req, res) => {
     res.json({
       initialized: true,
       ...status,
-      gitRepo
+      gitRepo,
+      lastRestoredCommitHash: gitRepo.last_restored_commit_hash
     });
 
   } catch (error) {
@@ -166,20 +228,22 @@ router.post('/:projectId/commit', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
-    const status = await gitManager.getStatus();
-    if (!status?.hasChanges) {
-      return res.json({ success: false, message: 'No changes to commit' });
+    // スマートコミット判定: 実際に内容が変更されている場合のみコミット
+    const hasContentChanges = await gitManager.hasContentChanges();
+    if (!hasContentChanges) {
+      console.log(`[COMMIT] No content changes detected for project ${projectId}`);
+      return res.json({ success: false, message: 'No content changes to commit' });
     }
 
-    // Add files to staging area
+    console.log(`[COMMIT] Content changes detected for project ${projectId}, proceeding with commit`);
+
+    // Add files to staging area (skip if hasContentChanges already added files)
     if (files.length > 0) {
       for (const filePath of files) {
         await gitManager.addFile(filePath);
       }
-    } else {
-      // Add all changes
-      await gitManager.addFile('.');
     }
+    // hasContentChanges() 内で既に git add . が実行されているため、全体追加はスキップ
 
     // Commit changes
     const result = await gitManager.commit(message, req.user.name, req.user.email);
@@ -556,135 +620,45 @@ router.post('/:projectId/restore', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
-    // Get list of files in the commit
-    const { promisify } = require('util');
-    const exec = promisify(require('child_process').exec);
-    const { stdout: fileList } = await exec(
-      `git ls-tree -r --name-only ${commitHash}`,
-      { cwd: projectPath }
+    console.log(`[RESTORE] Project ${projectId} to commit ${commitHash}`);
+
+    // Phase 1: 一時的に自動コミット機能を無効化し、シンプルな復元のみ実行
+    console.log(`  - Phase 1: Simple restore without auto-commit (for testing)`);
+
+    // シンプルな復元を実行
+    console.log(`  - Starting direct restore to ${commitHash}...`);
+    const restoreResult = await gitManager.restoreToCommit(commitHash);
+
+    if (!restoreResult.success) {
+      throw new Error(`Failed to restore commit: ${restoreResult.message}`);
+    }
+
+    console.log(`  - Restore completed successfully`);
+    console.log(`  - HEAD preserved: ${restoreResult.originalHead}`);
+    console.log(`  - HEAD unchanged: ${restoreResult.headUnchanged}`);
+    console.log(`  - Working tree has changes: ${restoreResult.hasChanges}`);
+
+    // 復元後、データベースを物理ファイルと同期
+    console.log(`  - Syncing database with restored files...`);
+    const syncResult = await gitManager.syncPhysicalFilesWithDatabase(projectId, req.user.id, db);
+    console.log(`  - Database sync completed: ${syncResult.fileCount} files, ${syncResult.folderCount} folders`);
+
+    // 復元が完了したら、last_restored_commit_hashを更新
+    await db.execute(`
+      UPDATE git_repositories
+      SET last_restored_commit_hash = ?, updated_at = NOW()
+      WHERE project_id = ?`,
+      [commitHash, projectId]
     );
 
-    const files = fileList.trim().split('\n').filter(file => file);
-    const commitFileSet = new Set(files);
-    const [existingRecords] = await db.execute(
-      'SELECT id, file_path, file_type FROM project_files WHERE project_id = ?',
-      [projectId]
-    );
-
-    const existingFileRecords = existingRecords.filter(record => record.file_type !== 'folder');
-    const existingFolderRecords = existingRecords.filter(record => record.file_type === 'folder');
-
-    const restoredFiles = [];
-
-    // Restore each file from the commit
-    for (const filePath of files) {
-      try {
-        const fileContent = await gitManager.getFileAtCommit(filePath, commitHash);
-        if (fileContent !== null) {
-          // Write to filesystem
-          const fullPath = path.join(projectPath, filePath);
-          await fs.mkdir(path.dirname(fullPath), { recursive: true });
-          await fs.writeFile(fullPath, fileContent);
-
-          // Update database
-          const fileName = path.basename(filePath);
-          const checksum = require('crypto').createHash('sha256').update(fileContent).digest('hex');
-          const fileSize = Buffer.byteLength(fileContent, 'utf8');
-
-          const [existingFiles] = await db.execute(
-            'SELECT * FROM project_files WHERE project_id = ? AND file_path = ?',
-            [projectId, filePath]
-          );
-
-          if (existingFiles.length > 0) {
-            // Update existing file
-            await db.execute(`
-              UPDATE project_files 
-              SET content = ?, file_size = ?, checksum = ?, updated_by = ?, updated_at = NOW()
-              WHERE project_id = ? AND file_path = ?`,
-              [fileContent, fileSize, checksum, req.user.id, projectId, filePath]
-            );
-          } else {
-            // Create new file record
-            const fileType = path.extname(fileName).slice(1) || 'text';
-            await db.execute(`
-              INSERT INTO project_files 
-              (project_id, file_path, file_name, content, file_type, file_size, 
-               checksum, is_binary, created_by, updated_by) 
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [projectId, filePath, fileName, fileContent, fileType, fileSize, 
-               checksum, false, req.user.id, req.user.id]
-            );
-          }
-
-          restoredFiles.push(filePath);
-        }
-      } catch (fileError) {
-        console.error(`Failed to restore file ${filePath}:`, fileError);
-      }
-    }
-
-    // Remove files that are not part of the target commit
-    for (const record of existingFileRecords) {
-      if (!commitFileSet.has(record.file_path)) {
-        const absolutePath = path.join(projectPath, record.file_path);
-        try {
-          await fs.rm(absolutePath, { force: true });
-        } catch (removeError) {
-          console.warn(`Failed to remove file ${absolutePath}:`, removeError.message);
-        }
-        await db.execute('DELETE FROM project_files WHERE id = ?', [record.id]);
-      }
-    }
-
-    // Ensure folder records exist for all directories in the commit
-    const folderPaths = new Set();
-    for (const filePath of files) {
-      let currentDir = path.posix.dirname(filePath);
-      while (currentDir && currentDir !== '.' && !folderPaths.has(currentDir)) {
-        folderPaths.add(currentDir);
-        const parent = path.posix.dirname(currentDir);
-        if (parent === currentDir) {
-          break;
-        }
-        currentDir = parent;
-      }
-    }
-
-    const existingFolderMap = new Map(existingFolderRecords.map(record => [record.file_path, record]));
-
-    for (const folderPath of folderPaths) {
-      if (!existingFolderMap.has(folderPath)) {
-        await db.execute(`
-          INSERT INTO project_files 
-          (project_id, file_path, file_name, content, file_type, file_size, 
-           permissions, checksum, is_binary, created_by, updated_by) 
-          VALUES (?, ?, ?, '', 'folder', 0, 'rwxr-xr-x', '', false, ?, ?)
-        `,
-        [projectId, folderPath, path.posix.basename(folderPath), req.user.id, req.user.id]);
-      }
-    }
-
-    // Remove folders that no longer exist in the target commit
-    const foldersToRemove = existingFolderRecords
-      .filter(record => record.file_path && !folderPaths.has(record.file_path))
-      .sort((a, b) => b.file_path.length - a.file_path.length);
-
-    for (const folderRecord of foldersToRemove) {
-      await db.execute('DELETE FROM project_files WHERE id = ?', [folderRecord.id]);
-      const absoluteFolderPath = path.join(projectPath, folderRecord.file_path);
-      try {
-        await fs.rm(absoluteFolderPath, { recursive: true, force: true });
-      } catch (removeFolderError) {
-        console.warn(`Failed to remove folder ${absoluteFolderPath}:`, removeFolderError.message);
-      }
-    }
+    console.log(`  - Restore operation completed successfully`);
 
     res.json({
+      success: true,
       message: 'Files restored successfully',
       commitHash,
-      restoredFiles,
-      restoredCount: restoredFiles.length
+      fileCount: syncResult.fileCount,
+      folderCount: syncResult.folderCount
     });
 
   } catch (error) {

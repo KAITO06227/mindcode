@@ -5,10 +5,72 @@ const fs = require('fs').promises;
 const jwt = require('jsonwebtoken');
 const db = require('../database/connection');
 const GitManager = require('../utils/gitManager');
+const { ensureUserRoot, resolveExistingProjectPath } = require('../utils/userWorkspace');
+const { randomUUID } = require('crypto');
 
 // Store active terminal sessions
 const terminals = {};
 const inputBuffers = {};
+const sessionState = {};
+const pendingPromptsByProject = {};
+const idleTimers = {};
+const commitPromptStore = {};
+
+function ensureSessionState(sessionKey, defaultProvider) {
+  if (!sessionState[sessionKey]) {
+    sessionState[sessionKey] = {
+      startTime: Date.now(),
+      prompts: [],
+      provider: defaultProvider,
+      completionTimer: null,
+      awaitingApproval: false,
+      lastPromptStartedAt: null,
+      responsePending: false,
+      finalizedPromptIds: new Set()
+    };
+  }
+  return sessionState[sessionKey];
+}
+
+function getProjectKey(userId, projectId) {
+  return `${userId}:${projectId}`;
+}
+
+function buildCommitMessage(prompts, providerName) {
+  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  if (!prompts || prompts.length === 0) {
+    return timestamp;
+  }
+  const list = Array.isArray(prompts) ? prompts : [prompts];
+  const normalized = list
+    .map((entry) => (typeof entry === 'string' ? entry : String(entry ?? '')).trim())
+    .filter(Boolean);
+
+  if (normalized.length === 0) {
+    return timestamp;
+  }
+
+  const previewParts = normalized.map((text) => {
+    const snippet = text.replace(/\s+/g, ' ');
+    return snippet.length > 80 ? `${snippet.slice(0, 77)}...` : snippet;
+  });
+
+  return [timestamp, ...normalized].join('\n');
+}
+
+function formatDuration(durationMs) {
+  if (typeof durationMs !== 'number' || Number.isNaN(durationMs) || durationMs < 0) {
+    return 'unknown duration';
+  }
+  const seconds = durationMs / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}秒`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  return `${minutes}分${remainingSeconds}秒`;
+}
 
 function normalizeTerminalInput(segment) {
   let result = '';
@@ -55,16 +117,27 @@ function normalizeTerminalInput(segment) {
   return result.trim();
 }
 
-async function ensureClaudeCliConfig(workspaceDir) {
+async function ensureClaudeCliConfig(homeDir, apiKey) {
   try {
-    /*
-    const apiKey = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      return;
+    const configDir = path.join(homeDir, '.config', 'claude');
+    const configPath = path.join(configDir, 'config.json');
+
+    await fs.mkdir(configDir, { recursive: true });
+
+    let needsWrite = true;
+    try {
+      const existingRaw = await fs.readFile(configPath, 'utf8');
+      const existing = JSON.parse(existingRaw);
+      if (existing?.auth?.method === 'api-key' && existing?.auth?.apiKey === apiKey) {
+        needsWrite = false;
+      }
+    } catch (readError) {
+      // Ignore missing or invalid config and overwrite below
     }
 
-    const configDir = path.join(workspaceDir, '.config', 'claude');
-    const configPath = path.join(configDir, 'config.json');
+    if (!needsWrite) {
+      return;
+    }
 
     const config = {
       auth: {
@@ -74,20 +147,81 @@ async function ensureClaudeCliConfig(workspaceDir) {
       }
     };
 
-    await fs.mkdir(configDir, { recursive: true });
     await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
-    */
   } catch (error) {
     console.warn('Failed to ensure Claude CLI config:', error.message);
   }
 }
 
-module.exports = (io) => {
-  console.log('Socket.IO server initialized for MindCode Terminal');
-  
-  io.on('connection', async (socket) => {
-    console.log('✅ New client connected:', socket.id);
+const PROVIDERS = {
+  claude: {
+    displayName: 'Claude Code',
+    command: process.platform === 'win32' ? 'claude.cmd' : 'claude',
+    async prepare({ workspaceDir, homeDir } = {}) {
+      const apiKey = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        return {
+          error:
+            'Claude CLI を利用するには環境変数 CLAUDE_API_KEY または ANTHROPIC_API_KEY を設定してください。'
+        };
+      }
 
+      await ensureClaudeCliConfig(homeDir, apiKey);
+
+      return {
+        env: {
+          CLAUDE_API_KEY: apiKey,
+          ANTHROPIC_API_KEY: apiKey,
+          XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+          CLAUDE_CONFIG_DIR: path.join(homeDir, '.config', 'claude')
+        }
+      };
+    }
+  },
+  codex: {
+    displayName: 'OpenAI Codex',
+    command: process.platform === 'win32' ? 'codex.cmd' : 'codex',
+    async prepare() {
+      const apiKey = process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY;
+      if (!apiKey) {
+        return {
+          error:
+            'Codex CLI を利用するには環境変数 OPENAI_API_KEY または CODEX_API_KEY を設定してください。'
+        };
+      }
+
+      return {
+        env: {
+          OPENAI_API_KEY: apiKey,
+          CODEX_API_KEY: apiKey
+        }
+      };
+    }
+  },
+  gemini: {
+    displayName: 'Google Gemini',
+    command: process.platform === 'win32' ? 'gemini.cmd' : 'gemini',
+    async prepare() {
+      const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+      if (!apiKey) {
+        return {
+          error:
+            'Gemini CLI を利用するには環境変数 GEMINI_API_KEY または GOOGLE_API_KEY を設定してください。'
+        };
+      }
+
+      return {
+        env: {
+          GEMINI_API_KEY: apiKey,
+          GOOGLE_API_KEY: apiKey
+        }
+      };
+    }
+  }
+};
+
+module.exports = (io) => {
+  io.on('connection', async (socket) => {
     const { projectId, token } = socket.handshake.query;
 
     if (!projectId) {
@@ -154,37 +288,77 @@ module.exports = (io) => {
     }
 
     // Create project workspace directory
-    const workspaceDir = path.join(__dirname, '../../user_projects', userId.toString(), projectId);
-    console.log('📁 Terminal workspace:', workspaceDir);
+    const homeDir = await ensureUserRoot({ id: userId, email: userInfo.email });
+    const workspaceDir = await resolveExistingProjectPath(
+      { id: userId, email: userInfo.email },
+      projectId
+    );
+    await fs.mkdir(workspaceDir, { recursive: true });
 
-    ensureClaudeCliConfig(workspaceDir).catch((error) => {
-      console.warn('Unable to prepare Claude CLI config:', error.message);
-    });
-    
-    // Determine Claude CLI binary based on platform
-    const claudeCommand = process.platform === 'win32' ? 'claude.cmd' : 'claude';
+    const requestedProvider = (socket.handshake.query?.provider || 'claude').toString().toLowerCase();
+    let providerKey = requestedProvider;
+    if (!PROVIDERS[providerKey]) {
+      socket.emit(
+        'output',
+        `\r\n⚠️ 未対応の CLI プロバイダ「${requestedProvider}」が指定されたため、Claude Code を利用します。\r\n`
+      );
+      providerKey = 'claude';
+    }
+
+    const providerConfig = PROVIDERS[providerKey];
+
+    let preparation;
+    try {
+      preparation = await providerConfig.prepare({ workspaceDir, homeDir });
+    } catch (prepError) {
+      console.error(`❌ Failed to prepare ${providerConfig.displayName} CLI:`, prepError.message);
+      socket.emit(
+        'output',
+        `\r\n❌ ${providerConfig.displayName} の準備に失敗しました。サーバー管理者にお問い合わせください。\r\n`
+      );
+      socket.disconnect();
+      return;
+    }
+
+    if (preparation?.error) {
+      socket.emit(
+        'output',
+        `\r\n❌ ${preparation.error}\r\n別のプロバイダを選択するか、環境変数を設定してから再試行してください。\r\n`
+      );
+      return;
+    }
+
+    const providerEnv = preparation?.env || {};
 
     let ptyProcess;
+    let autoApprovalHandled = false;
     try {
-      // Spawn Claude CLI directly so no other commands can execute
-      ptyProcess = pty.spawn(claudeCommand, [], {
+      // Spawn the selected AI CLI directly so no other commands can execute
+      ptyProcess = pty.spawn(providerConfig.command, [], {
         name: 'xterm-color',
         cols: 80,
         rows: 30,
         cwd: workspaceDir,
         env: {
           ...process.env,
-          CLAUDE_API_KEY: process.env.CLAUDE_API_KEY,
-          ANTHROPIC_API_KEY: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY,
-          XDG_CONFIG_HOME: path.join(workspaceDir, '.config'),
-          CLAUDE_CONFIG_DIR: path.join(workspaceDir, '.config', 'claude'),
-          HOME: workspaceDir
+          HOME: homeDir,
+          PWD: workspaceDir,
+          XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+          AI_TERMINAL_PROVIDER: providerKey,
+          ...providerEnv
         }
       });
     } catch (spawnError) {
-      console.error('❌ Failed to launch Claude CLI:', spawnError.message);
-      socket.emit('output', '\r\n❌ Claude CLI を起動できませんでした。サーバー管理者にお問い合わせください。\r\n');
-      socket.disconnect();
+      console.error(`❌ Failed to launch ${providerConfig.displayName} CLI:`, spawnError.message);
+
+      let errorMessage = `\r\n❌ ${providerConfig.displayName} CLI を起動できませんでした。サーバー管理者にお問い合わせください。\r\n`;
+
+      if (spawnError.code === 'ENOENT' || /ENOENT/.test(spawnError.message)) {
+        errorMessage = `\r\n❌ ${providerConfig.displayName} CLI コマンド \"${providerConfig.command}\" が見つかりません。\r\n` +
+          'CLI をサーバーにインストールするか、別のプロバイダを選択してください。\r\n';
+      }
+
+      socket.emit('output', `${errorMessage}\r\n別のプロバイダを選択するか、環境を確認してから再試行してください。\r\n`);
       return;
     }
 
@@ -196,15 +370,311 @@ module.exports = (io) => {
 
     // Handle PTY spawn event
     ptyProcess.on('spawn', () => {
-      console.log('✅ Claude CLI spawned for socket:', socket.id);
-      socket.emit('output', '\r\n✅ Claude Code セッションを開始しました\r\n');
+      socket.emit('output', `\r\n✅ ${providerConfig.displayName} セッションを開始しました\r\n`);
       socket.emit('output', `📁 作業ディレクトリ: ${workspaceDir}\r\n`);
     });
 
+    const projectKey = getProjectKey(userId, projectId);
+
+    const queueCommitAfterIdle = () => {
+      const state = sessionState[socket.id];
+      if (!state || state.prompts.length === 0) {
+        return;
+      }
+
+      if (!state.responsePending) {
+        return;
+      }
+
+      if (state.awaitingApproval) {
+        return;
+      }
+
+      if (idleTimers[socket.id]) {
+        clearTimeout(idleTimers[socket.id]);
+      }
+
+      if (state.completionTimer) {
+        clearTimeout(state.completionTimer);
+        state.completionTimer = null;
+      }
+
+      idleTimers[socket.id] = setTimeout(() => {
+        finalizeSession({ reason: state.awaitingApproval ? 'approval-idle' : 'idle' }).catch((idleError) => {
+          console.error('Failed to finalize AI session on idle:', idleError);
+        });
+      }, 2000);
+    };
+
+    async function finalizeSession({ reason }) {
+      const sessionKey = socket.id;
+      const state = sessionState[sessionKey];
+      if (!state) {
+        return;
+      }
+
+      if (state.completionTimer) {
+        clearTimeout(state.completionTimer);
+        state.completionTimer = null;
+      }
+
+      if (idleTimers[sessionKey]) {
+        clearTimeout(idleTimers[sessionKey]);
+        delete idleTimers[sessionKey];
+      }
+
+      if (state.awaitingApproval && !['exit', 'prompt-ready', 'approval-idle'].includes(reason)) {
+        return;
+      }
+
+      state.responsePending = false;
+
+      const promptsFromSession = state.prompts || [];
+      const promptTexts = promptsFromSession.map(entry => entry.text);
+      const lastPrompt = promptsFromSession[promptsFromSession.length - 1];
+      const durationMs = lastPrompt ? Math.max(0, Date.now() - (lastPrompt.startedAt || state.startTime)) : null;
+
+      if (promptsFromSession.length > 0) {
+        for (const entry of promptsFromSession) {
+          if (state.finalizedPromptIds.has(entry.id)) {
+            continue;
+          }
+          try {
+            const promptDuration = Math.max(0, Date.now() - (entry.startedAt || state.startTime));
+            await db.execute(
+              'INSERT INTO claude_prompt_logs (project_id, user_id, prompt, duration_ms) VALUES (?, ?, ?, ?)',
+              [projectId, userId, entry.text, promptDuration]
+            );
+            state.finalizedPromptIds.add(entry.id);
+          } catch (logError) {
+            console.warn('Failed to record prompt log:', logError.message);
+          }
+        }
+      }
+
+      // remove processed prompts from current session buffer
+      state.prompts = [];
+      state.startTime = Date.now();
+      state.lastPromptStartedAt = null;
+
+      const existingPending = pendingPromptsByProject[projectKey] || [];
+      const promptsForCommit = promptTexts.length > 0
+        ? existingPending.concat(promptTexts)
+        : existingPending;
+
+      if (promptsForCommit.length > 0) {
+        const providerName = state.provider || providerConfig.displayName;
+
+        const runWithIndexLockRetry = async (operation) => {
+          try {
+            return await operation();
+          } catch (error) {
+            if (/index\.lock/.test(error.message || '')) {
+              try {
+                await gitManager.clearIndexLock();
+              } catch (lockError) {
+                console.warn('Failed to clear git index.lock:', lockError.message);
+              }
+              return await operation();
+            }
+            throw error;
+          }
+        };
+
+        if (await gitManager.isInitialized()) {
+          try {
+            const status = await gitManager.getStatus();
+            if (!status?.hasChanges) {
+              pendingPromptsByProject[projectKey] = promptsForCommit;
+              socket.emit('commit_notification', {
+                status: 'info',
+                provider: providerName,
+                count: promptsForCommit.length,
+                durationMs,
+                message: 'コード差分が無かったためコミットは保留されました。次回の変更時にまとめてコミットします。'
+              });
+              return;
+            }
+
+            await runWithIndexLockRetry(() => gitManager.addFile('.'));
+            const commitMessage = buildCommitMessage(promptsForCommit, providerName);
+            const commitResult = await runWithIndexLockRetry(() => gitManager.commit(
+              commitMessage,
+              userInfo.name || 'WebIDE User',
+              userInfo.email || 'webide@example.com'
+            ));
+
+            if (commitResult.success) {
+              commitPromptStore[commitResult.commitHash] = {
+                projectId,
+                prompts: promptsForCommit.slice()
+              };
+              delete pendingPromptsByProject[projectKey];
+              const durationLabel = typeof durationMs === 'number'
+                ? formatDuration(durationMs)
+                : '前回保留分';
+              socket.emit('commit_notification', {
+                status: 'success',
+                provider: providerName,
+                count: promptsForCommit.length,
+                durationMs,
+                message: `トリップコードへコミットしました (${promptsForCommit.length}件, ${durationLabel})`
+              });
+              socket.emit('save_complete', {
+                message: '保存が完了しました',
+                timestamp: new Date().toISOString()
+              });
+            } else {
+              const noChanges = /no changes/i.test(commitResult.message || '');
+              pendingPromptsByProject[projectKey] = promptsForCommit;
+              socket.emit('commit_notification', {
+                status: noChanges ? 'info' : 'warning',
+                provider: providerName,
+                count: promptsForCommit.length,
+                durationMs,
+                message: noChanges
+                  ? '変更がなかったためコミットは保留されました。次回の変更時にまとめてコミットします。'
+                  : `コミットをスキップしました: ${commitResult.message}`
+              });
+            }
+          } catch (gitError) {
+            if (/nothing to commit/i.test(gitError.message || '')) {
+              pendingPromptsByProject[projectKey] = promptsForCommit;
+              console.warn('No changes detected for commit; deferring until next modifications.');
+              socket.emit('commit_notification', {
+                status: 'info',
+                provider: providerName,
+                count: promptsForCommit.length,
+                durationMs,
+                message: '変更がなかったためコミットは保留されました。次回の変更時にまとめてコミットします。'
+              });
+            } else {
+            pendingPromptsByProject[projectKey] = promptsForCommit;
+            console.warn('Auto-commit after AI session failed:', gitError.message);
+            socket.emit('commit_notification', {
+              status: 'error',
+              provider: providerName,
+              count: promptsForCommit.length,
+              durationMs,
+              message: `コミットに失敗しました: ${gitError.message}`
+            });
+            }
+          }
+        } else {
+          pendingPromptsByProject[projectKey] = promptsForCommit;
+          socket.emit('commit_notification', {
+            status: 'info',
+            provider: providerName,
+            count: promptsForCommit.length,
+            durationMs,
+            message: 'トリップコードが未初期化のため、プロンプトを保留しました'
+          });
+        }
+      }
+
+      delete sessionState[sessionKey];
+    }
+
+    let sessionClosed = false;
+    const handleProcessExit = async (code, signal) => {
+      if (sessionClosed) {
+        return;
+      }
+      sessionClosed = true;
+
+      try {
+        await finalizeSession({ reason: 'exit' });
+      } catch (finalizeError) {
+        console.error('Failed to finalize AI session:', finalizeError);
+        socket.emit(
+          'output',
+          `\r\n⚠️ セッション後処理に失敗しました: ${finalizeError.message}\r\n`
+        );
+      } finally {
+        if (terminals[socket.id] === ptyProcess) {
+          delete terminals[socket.id];
+        }
+        if (inputBuffers[socket.id]) {
+          delete inputBuffers[socket.id];
+        }
+      }
+
+      const reasonParts = [];
+      if (typeof code === 'number') {
+        reasonParts.push(`code ${code}`);
+      }
+      if (signal) {
+        reasonParts.push(`signal ${signal}`);
+      }
+      if (reasonParts.length > 0) {
+        socket.emit('output', `\r\n⚠️ セッションが終了しました (${reasonParts.join(', ')})\r\n`);
+      }
+    };
+
     // Handle PTY data output
     ptyProcess.on('data', (data) => {
-      socket.emit('output', data);
+      const rawText = data.toString();
+      socket.emit('output', rawText);
+      const state = sessionState[socket.id];
+      if (!state) {
+        return;
+      }
+
+      const lowerText = rawText.toLowerCase();
+      const approvalPatterns = [
+        'allow command?',
+        'approval required',
+        'always approve this session',
+        'always yes',
+        'use arrow keys',
+        'select an option',
+        'apply this change?',
+        '1. yes',
+        '2. yes, allow all edits',
+        '3. no, and tell claude'
+      ];
+
+      const normalizedChoicePrefix = rawText.replace(/^[^\x1b]*\x1b\[[0-9;]*m/g, '').trim();
+      if (
+        approvalPatterns.some(pattern => lowerText.includes(pattern)) ||
+        normalizedChoicePrefix.startsWith('│ ❯ 1. yes') ||
+        normalizedChoicePrefix.startsWith('│   1. yes')
+      ) {
+        state.awaitingApproval = true;
+        if (idleTimers[socket.id]) {
+          clearTimeout(idleTimers[socket.id]);
+          delete idleTimers[socket.id];
+        }
+        if (state.completionTimer) {
+          clearTimeout(state.completionTimer);
+          state.completionTimer = null;
+        }
+        return;
+      }
+
+      if (state.awaitingApproval && /press enter/.test(lowerText)) {
+        state.awaitingApproval = false;
+        state.responsePending = true;
+        return;
+      }
+
+      const trimmedLines = rawText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      const promptReady = trimmedLines.some(line => /^you:\s*$/i.test(line));
+
+      if (promptReady && state.responsePending && !state.awaitingApproval) {
+        finalizeSession({ reason: 'prompt-ready' }).catch((err) => {
+          console.error('Failed to finalize after prompt-ready:', err);
+        });
+        return;
+      }
+
+      if (state.prompts.length > 0 && state.responsePending && !state.awaitingApproval) {
+        queueCommitAfterIdle();
+      }
     });
+
+    ptyProcess.on('exit', handleProcessExit);
+    ptyProcess.on('close', handleProcessExit);
 
     // Handle user input
     socket.on('input', async (data) => {
@@ -212,11 +682,24 @@ module.exports = (io) => {
         terminals[socket.id].write(data);
       }
 
+      if (!terminals[socket.id]) {
+        return;
+      }
+
+      const sessionKey = socket.id;
+      const currentState = ensureSessionState(sessionKey, providerConfig.displayName);
+      currentState.provider = providerConfig.displayName;
+
       const stringData = data.toString();
       if (!inputBuffers[socket.id]) {
         inputBuffers[socket.id] = '';
       }
       inputBuffers[socket.id] += stringData;
+
+      if (currentState.awaitingApproval && stringData.includes('\r')) {
+        currentState.awaitingApproval = false;
+        currentState.responsePending = true;
+      }
 
       const containsCR = stringData.includes('\r');
       const containsLF = stringData.includes('\n');
@@ -224,57 +707,102 @@ module.exports = (io) => {
       if (containsCR || containsLF) {
         const segments = inputBuffers[socket.id].split(/\r?\n|\r/);
         inputBuffers[socket.id] = segments.pop();
+        for (const segment of segments) {
+          const state = ensureSessionState(sessionKey, providerConfig.displayName);
+          let cleaned = normalizeTerminalInput(segment);
 
-        if (containsCR && !containsLF) {
-          for (const segment of segments) {
-            const cleaned = normalizeTerminalInput(segment);
-
-            if (cleaned.length === 0) {
-              continue;
+          if (cleaned.length === 0) {
+            if (state.awaitingApproval) {
+              state.awaitingApproval = false;
+              state.responsePending = true;
             }
-
-            try {
-              if (await gitManager.isInitialized()) {
-                try {
-                  await gitManager.addFile('.');
-                  const commitMessage = `Auto-commit before Claude prompt: ${cleaned.slice(0, 60)}`;
-                  const commitResult = await gitManager.commit(
-                    commitMessage,
-                    userInfo.name || 'WebIDE User',
-                    userInfo.email || 'webide@example.com'
-                  );
-                  if (!commitResult.success) {
-                    console.log('Auto-commit skipped:', commitResult.message);
-                  }
-                } catch (gitError) {
-                  console.warn('Auto-commit before Claude prompt failed:', gitError.message);
-                }
-              }
-
-              await db.execute(
-                'INSERT INTO claude_prompt_logs (project_id, user_id, prompt) VALUES (?, ?, ?)',
-                [projectId, userId, cleaned]
-              );
-            } catch (logError) {
-              console.warn('Failed to log terminal input:', logError.message);
-            }
+            continue;
           }
+
+          if (/^\[\?[0-9;]*[A-Za-z]/.test(cleaned)) {
+            cleaned = cleaned.replace(/^\[\?[0-9;]*[A-Za-z]/, '');
+          }
+
+          cleaned = cleaned.trimStart();
+
+          if (cleaned.length === 0) {
+            continue;
+          }
+
+          const isDeviceAttrResponse = /^\[\?[0-9;]*[A-Za-z]$/.test(cleaned);
+          const isArrowKey = cleaned.length === 1 && ['A', 'B', 'C', 'D'].includes(cleaned);
+          const isArrowLabel = /^(?:←|↑|→|↓)$/.test(cleaned);
+          const hasMeaningfulContent = /[A-Za-z0-9\u3000-\u303F\u3040-\u30FF\u31F0-\u31FF\u4E00-\u9FFF]/.test(cleaned);
+
+          if (isDeviceAttrResponse || isArrowKey || isArrowLabel || !hasMeaningfulContent) {
+            continue;
+          }
+
+          if (state.completionTimer) {
+            clearTimeout(state.completionTimer);
+            state.completionTimer = null;
+          }
+          const nowTs = Date.now();
+          if (state.prompts.length === 0) {
+            state.startTime = nowTs;
+          }
+          const normalizedText = cleaned.trim().toLowerCase();
+          const approvalResponses = new Set([
+            'y', 'yes', 'n', 'no', 'a', 'always', 'always yes',
+            '1', '2', '3', 'cancel', 'esc', 'shift+tab'
+          ]);
+
+          if (state.awaitingApproval && approvalResponses.has(normalizedText)) {
+            state.awaitingApproval = false;
+            continue;
+          }
+
+          state.prompts.push({
+            id: randomUUID(),
+            text: cleaned,
+            startedAt: nowTs
+          });
+          state.responsePending = true;
+          state.provider = providerConfig.displayName;
+          state.lastPromptAt = nowTs;
+          queueCommitAfterIdle();
         }
       }
     });
 
     // Handle terminal resize
     socket.on('resize', (size) => {
-      if (terminals[socket.id]) {
-        terminals[socket.id].resize(size.cols, size.rows);
+      const terminalInstance = terminals[socket.id];
+      if (!terminalInstance) {
+        return;
+      }
+      try {
+        terminalInstance.resize(size.cols, size.rows);
+      } catch (resizeError) {
+        console.warn('Failed to resize PTY session:', resizeError.message);
+        socket.emit('output', '\r\n⚠️ ターミナルのサイズ変更に失敗しました。セッションを再接続してください。\r\n');
+      }
+    });
+
+    socket.on('terminate_session', () => {
+      if (!ptyProcess) {
+        return;
+      }
+      try {
+        ptyProcess.kill();
+      } catch (terminateError) {
+        console.warn('Failed to terminate PTY on explicit request:', terminateError.message);
       }
     });
 
     // Handle disconnect
     socket.on('disconnect', () => {
-      console.log('❌ Client disconnected:', socket.id);
       if (terminals[socket.id]) {
-        terminals[socket.id].kill();
+        try {
+          terminals[socket.id].kill();
+        } catch (killError) {
+          console.warn('Failed to terminate PTY on disconnect:', killError.message);
+        }
         delete terminals[socket.id];
       }
       if (inputBuffers[socket.id]) {
@@ -306,3 +834,5 @@ async function checkClaudeAvailability() {
     }, 3000);
   });
 }
+
+module.exports.commitPromptStore = commitPromptStore;

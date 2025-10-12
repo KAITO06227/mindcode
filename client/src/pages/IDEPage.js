@@ -571,6 +571,39 @@ const IDEPage = () => {
     return id;
   }, [setNotifications]);
 
+  const handleSave = useCallback(async () => {
+    if (!selectedFile) {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      if (selectedFile.id) {
+        await axios.post(`/api/filesystem/${projectId}/files`, {
+          fileName: selectedFile.file_name,
+          filePath: selectedFile.file_path,
+          content: selectedFile.content
+        });
+      } else {
+        const pathParts = selectedFile.file_path.split('/');
+        pathParts.pop();
+        const parentPath = pathParts.join('/');
+
+        await axios.post(`/api/filesystem/${projectId}/files`, {
+          fileName: selectedFile.file_name,
+          filePath: parentPath,
+          content: selectedFile.content
+        });
+      }
+
+      return true;
+    } catch (error) {
+      throw error;
+    } finally {
+      setSaving(false);
+    }
+  }, [selectedFile, projectId]);
+
   const saveCurrentFileIfNeeded = useCallback(async (options = {}) => {
     if (!selectedFile) {
       return false;
@@ -710,13 +743,13 @@ const IDEPage = () => {
 
   useEffect(() => {
     fetchFileTree();
-  }, [fetchFileTree, pushNotification]);
+  }, [fetchFileTree]);
 
   // Git復元後のファイルツリー更新（強制同期）
   const handleGitRefresh = useCallback(() => {
     console.log('[IDE] Git refresh requested - forcing sync');
     fetchFileTree(true);
-  }, [fetchFileTree, pushNotification]);
+  }, [fetchFileTree]);
 
   useEffect(() => {
     if (!user || authLoading) {
@@ -911,39 +944,6 @@ const IDEPage = () => {
       console.error('Error fetching file content:', error);
     }
   };
-
-  const handleSave = useCallback(async () => {
-    if (!selectedFile) {
-      return;
-    }
-
-    setSaving(true);
-    try {
-      if (selectedFile.id) {
-        await axios.post(`/api/filesystem/${projectId}/files`, {
-          fileName: selectedFile.file_name,
-          filePath: selectedFile.file_path,
-          content: selectedFile.content
-        });
-      } else {
-        const pathParts = selectedFile.file_path.split('/');
-        pathParts.pop();
-        const parentPath = pathParts.join('/');
-
-        await axios.post(`/api/filesystem/${projectId}/files`, {
-          fileName: selectedFile.file_name,
-          filePath: parentPath,
-          content: selectedFile.content
-        });
-      }
-
-      return true;
-    } catch (error) {
-      throw error;
-    } finally {
-      setSaving(false);
-    }
-  }, [selectedFile, projectId]);
 
   const handleFileContentChange = (content) => {
     if (selectedFile) {

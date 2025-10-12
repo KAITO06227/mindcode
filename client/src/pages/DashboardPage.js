@@ -225,7 +225,7 @@ const DashboardPage = () => {
   const handleDeleteProject = async (projectId, projectName, event) => {
     event.stopPropagation(); // Prevent card click
     
-    const confirmMessage = `本当にプロジェクト「${projectName}」を削除しますか？\n\n⚠️ この操作は取り消すことができません。\n・すべてのファイルが削除されます\n・Git履歴も削除されます\n・関連するデータもすべて削除されます`;
+    const confirmMessage = `本当にプロジェクト「${projectName}」を削除しますか？\n\n⚠️ この操作は取り消すことができません。\n・すべてのファイルが削除されます\n・トリップコード履歴も削除されます\n・関連するデータもすべて削除されます`;
     
     if (!window.confirm(confirmMessage)) {
       return;
@@ -331,7 +331,7 @@ const DashboardPage = () => {
                   <ProjectMeta>
                     <span>更新日 {formatDate(project.updated_at)}</span>
                     {project.git_url && (
-                      <FiGithub title="Gitリポジトリ接続済み" />
+                      <FiGithub title="トリップコードリポジトリ接続済み" />
                     )}
                   </ProjectMeta>
                 </ProjectCard>

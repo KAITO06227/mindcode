@@ -397,16 +397,21 @@ const AdminPage = () => {
     navigate(`/ide/${projectId}`);
   };
 
-  const viewProjectPreview = async (projectId) => {
-    try {
-      const response = await axios.get(`/api/admin/projects/${projectId}/preview`);
-      const baseOrigin = getApiOrigin();
-      const previewUrl = new URL(response.data.previewUrl, baseOrigin);
+  const viewProjectPreview = (project) => {
+    if (!project?.id || !selectedUser?.email) {
+      alert('プレビュー用の情報が不足しています');
+      return;
+    }
 
-      window.open(previewUrl.toString(), '_blank', 'noopener');
+    try {
+      const baseOrigin = getApiOrigin();
+      const encodedEmail = encodeURIComponent(selectedUser.email);
+      const encodedProjectId = encodeURIComponent(project.id);
+      const url = new URL(`/user_projects/${encodedEmail}/${encodedProjectId}/index.html`, baseOrigin);
+      window.open(url.toString(), '_blank', 'noopener');
     } catch (error) {
-      console.error('Error opening project preview:', error);
-      alert('プロジェクトのプレビューを開けませんでした');
+      console.error('Error building project preview URL:', error);
+      alert('プロジェクトのプレビュー URL を生成できませんでした');
     }
   };
 
@@ -557,7 +562,7 @@ const AdminPage = () => {
                       <ProjectTitle>{project.name}</ProjectTitle>
                       <ProjectMeta>
                         <span>更新: {formatDate(project.updated_at)}</span>
-                        {project.git_url && <span>Git: 接続済み</span>}
+                        {project.git_url && <span>トリップコード: 接続済み</span>}
                       </ProjectMeta>
                     </ProjectInfo>
                     <ProjectActions>
@@ -569,7 +574,7 @@ const AdminPage = () => {
                         プロンプト
                       </Button>
                       <Button
-                        onClick={() => viewProjectPreview(project.id)}
+                        onClick={() => viewProjectPreview(project)}
                         title="プロジェクトを表示"
                       >
                         <FiEye size={16} />

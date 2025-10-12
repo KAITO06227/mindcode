@@ -1,0 +1,50 @@
+.claude-terminal-container {
+  position: relative;
+}
+
+.claude-terminal-host {
+  overflow: hidden;
+}
+
+.claude-terminal-host .xterm {
+  height: 100%;
+  touch-action: pan-y;
+}
+
+.claude-terminal-host .xterm-viewport {
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
+}
+
+.claude-terminal-host .xterm-screen canvas {
+  display: block;
+}
+
+/* カーソルの点滅を制御 */
+.claude-terminal-host .xterm-cursor-blink {
+  animation: blink 1s linear infinite;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+/* 過度な点滅を防ぐ */
+.claude-terminal-host .xterm-screen {
+  animation: none !important;
+  transition: none !important;
+}
+
+.claude-terminal-host .xterm-viewport {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* ターミナル全体の安定性を確保 */
+.claude-terminal-host {
+  backface-visibility: hidden;
+  transform: translateZ(0);
+  will-change: auto;
+}

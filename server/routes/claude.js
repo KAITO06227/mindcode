@@ -4,13 +4,14 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
 const db = require('../database/connection');
+const { ensureUserRoot, resolveExistingProjectPath } = require('../utils/userWorkspace');
 
 const router = express.Router();
 
 // Store active Claude processes
 const claudeProcesses = new Map();
 
-async function ensureClaudeCliConfig(projectPath) {
+async function ensureClaudeCliConfig(homeDir) {
   try {
     /*
     const apiKey = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY;
@@ -18,7 +19,7 @@ async function ensureClaudeCliConfig(projectPath) {
       return;
     }
 
-    const configDir = path.join(projectPath, '.config', 'claude');
+    const configDir = path.join(homeDir, '.config', 'claude');
     const configPath = path.join(configDir, 'config.json');
 
     const config = {
@@ -40,10 +41,8 @@ async function ensureClaudeCliConfig(projectPath) {
 // Start Claude Code for a project
 router.post('/start/:projectId', verifyToken, async (req, res) => {
   try {
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), req.params.projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId);
     const processKey = `${req.user.id}_${req.params.projectId}`;
-
-    console.log(`Starting Claude Code for project: ${req.params.projectId} at ${projectPath}`);
 
     // Check if project directory exists
     try {
@@ -64,7 +63,8 @@ router.post('/start/:projectId', verifyToken, async (req, res) => {
       });
     }
 
-    await ensureClaudeCliConfig(projectPath);
+    const userRoot = await ensureUserRoot(req.user);
+    await ensureClaudeCliConfig(userRoot);
 
     // Start Claude Code
     const claudeProcess = spawn('npx', ['claude'], {
@@ -74,15 +74,10 @@ router.post('/start/:projectId', verifyToken, async (req, res) => {
         ...process.env,
         CLAUDE_API_KEY: process.env.CLAUDE_API_KEY,
         ANTHROPIC_API_KEY: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY,
-        XDG_CONFIG_HOME: path.join(projectPath, '.config'),
-        CLAUDE_CONFIG_DIR: path.join(projectPath, '.config', 'claude'),
-        HOME: projectPath
+        XDG_CONFIG_HOME: path.join(userRoot, '.config'),
+        CLAUDE_CONFIG_DIR: path.join(userRoot, '.config', 'claude'),
+        HOME: userRoot
       }
-    });
-
-    // Log stdout for debugging
-    claudeProcess.stdout.on('data', (data) => {
-      console.log(`Claude stdout [${processKey}]:`, data.toString());
     });
 
     // Log stderr for debugging
@@ -107,7 +102,6 @@ router.post('/start/:projectId', verifyToken, async (req, res) => {
     });
 
     claudeProcess.on('close', (code, signal) => {
-      console.log(`Claude process ${processKey} exited with code: ${code}, signal: ${signal}`);
       claudeProcesses.delete(processKey);
     });
 
@@ -155,9 +149,6 @@ router.post('/send/:projectId', verifyToken, async (req, res) => {
         message: 'Project not found or access denied'
       });
     }
-
-    console.log(`Sending message to Claude: ${message}`);
-
     // Get Claude process
     const claudeProcess = claudeProcesses.get(processKey);
     
@@ -171,8 +162,8 @@ router.post('/send/:projectId', verifyToken, async (req, res) => {
     // Log prompt before sending
     try {
       await db.execute(
-        'INSERT INTO claude_prompt_logs (project_id, user_id, prompt) VALUES (?, ?, ?)',
-        [req.params.projectId, req.user.id, message.trim()]
+        'INSERT INTO claude_prompt_logs (project_id, user_id, prompt, duration_ms) VALUES (?, ?, ?, ?)',
+        [req.params.projectId, req.user.id, message.trim(), null]
       );
     } catch (logError) {
       console.warn('Failed to log Claude prompt:', logError.message);
@@ -201,9 +192,6 @@ router.get('/status/:projectId', verifyToken, (req, res) => {
   try {
     const processKey = `${req.user.id}_${req.params.projectId}`;
     const claudeProcess = claudeProcesses.get(processKey);
-    
-    console.log(`Status check for: ${processKey}`);
-    console.log(`Active processes:`, Array.from(claudeProcesses.keys()));
     
     if (!claudeProcess) {
       return res.json({
@@ -246,12 +234,10 @@ router.get('/status/:projectId', verifyToken, (req, res) => {
 router.get('/stream/:projectId', verifyToken, (req, res) => {
   try {
     const processKey = `${req.user.id}_${req.params.projectId}`;
-    console.log(`SSE connection request for: ${processKey}`);
     
     const claudeProcess = claudeProcesses.get(processKey);
     
     if (!claudeProcess) {
-      console.log(`No Claude process found for: ${processKey}`);
       return res.status(400).json({
         success: false,
         message: 'Claude Code not started'
@@ -259,14 +245,11 @@ router.get('/stream/:projectId', verifyToken, (req, res) => {
     }
     
     if (claudeProcess.killed) {
-      console.log(`Claude process killed for: ${processKey}`);
       return res.status(400).json({
         success: false,
         message: 'Claude Code process terminated'
       });
     }
-
-    console.log(`Setting up SSE for: ${processKey}, PID: ${claudeProcess.pid}`);
 
     // Set up Server-Sent Events
     res.writeHead(200, {
@@ -278,7 +261,6 @@ router.get('/stream/:projectId', verifyToken, (req, res) => {
     });
 
     // Send initial connection message
-    console.log(`Sending connected message for: ${processKey}`);
     res.write('data: {"type": "connected"}\n\n');
 
     // Send heartbeat every 30 seconds
@@ -315,7 +297,6 @@ router.get('/stream/:projectId', verifyToken, (req, res) => {
 
     // Handle process end
     const onClose = () => {
-      console.log(`Claude process closed for: ${processKey}`);
       if (!res.destroyed) {
         res.write('data: {"type": "closed"}\n\n');
         res.end();
@@ -326,7 +307,6 @@ router.get('/stream/:projectId', verifyToken, (req, res) => {
 
     // Clean up on client disconnect
     req.on('close', () => {
-      console.log(`Client disconnected from SSE: ${processKey}`);
       clearInterval(heartbeatInterval);
       claudeProcess.stdout.removeListener('data', onStdout);
       claudeProcess.stderr.removeListener('data', onStderr);
@@ -337,7 +317,6 @@ router.get('/stream/:projectId', verifyToken, (req, res) => {
     });
 
     req.on('aborted', () => {
-      console.log(`Client aborted SSE connection: ${processKey}`);
       clearInterval(heartbeatInterval);
       claudeProcess.stdout.removeListener('data', onStdout);
       claudeProcess.stderr.removeListener('data', onStderr);
@@ -361,10 +340,7 @@ router.get('/stream/:projectId', verifyToken, (req, res) => {
 router.post('/execute/:projectId', verifyToken, async (req, res) => {
   try {
     const { prompt } = req.body;
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), req.params.projectId);
-
-    console.log(`Executing Claude Code for project: ${req.params.projectId}`);
-    console.log(`Prompt: ${prompt}`);
+    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId);
 
     // Check if project directory exists
     try {
@@ -397,8 +373,6 @@ router.post('/execute/:projectId', verifyToken, async (req, res) => {
 
     // Handle process completion
     claudeProcess.on('close', (code) => {
-      console.log(`Claude process exited with code: ${code}`);
-      
       if (code === 0) {
         res.json({
           success: true,

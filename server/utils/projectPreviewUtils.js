@@ -132,36 +132,47 @@ const serveProjectAsset = async ({
     res.send(fileBuffer);
     return;
   } catch (fsError) {
-    try {
-      const [files] = await db.execute(
-        'SELECT content, file_type, file_path FROM project_files WHERE project_id = ? AND file_path = ?',
-        [projectId, safeRequestedPath]
-      );
+    if (db && typeof db.execute === 'function') {
+      try {
+        const [files] = await db.execute(
+          'SELECT content, file_type, file_path FROM project_files WHERE project_id = ? AND file_path = ?',
+          [projectId, safeRequestedPath]
+        );
 
-      if (files.length === 0) {
-        res.status(404).send('<h1>File not found</h1>');
-        return;
-      }
+        if (files.length === 0) {
+          res.status(404).send('<h1>File not found</h1>');
+          return;
+        }
 
-      const file = files[0];
-      const contentType = resolveContentType(
-        file.file_path || safeRequestedPath,
-        file.file_type === 'html' ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8'
-      );
+        const file = files[0];
+        const contentType = resolveContentType(
+          file.file_path || safeRequestedPath,
+          file.file_type === 'html' ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8'
+        );
 
-      if (contentType.startsWith('text/html')) {
+        if (contentType.startsWith('text/html')) {
+          res.setHeader('Content-Type', contentType);
+          res.send(enhanceHtmlForPreview(file.content, baseHref, token));
+          return;
+        }
+
         res.setHeader('Content-Type', contentType);
-        res.send(enhanceHtmlForPreview(file.content, baseHref, token));
+        res.send(file.content);
         return;
+      } catch (dbError) {
+        console.error('Error loading file from database:', dbError);
+        res.status(500).send('<h1>Error loading project file</h1>');
       }
-
-      res.setHeader('Content-Type', contentType);
-      res.send(file.content);
       return;
-    } catch (dbError) {
-      console.error('Error loading file from database:', dbError);
-      res.status(500).send('<h1>Error loading project file</h1>');
     }
+
+    if (fsError && fsError.code === 'ENOENT') {
+      res.status(404).send('<h1>File not found</h1>');
+      return;
+    }
+
+    console.error('Error loading project file from filesystem:', fsError);
+    res.status(500).send('<h1>Error loading project file</h1>');
   }
 };
 

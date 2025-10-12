@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useImperativeHandle, forwardRef } from 'react';
 import Editor from '@monaco-editor/react';
 import styled from 'styled-components';
 
@@ -49,23 +49,28 @@ const EditorWrapper = styled.div`
   width: 100%;
 `;
 
-const CodeEditor = ({ file, onChange, onSave, autoSave = true, autoSaveInterval = 3000 }) => {
+const CodeEditor = forwardRef(({ file, onChange, onSave }, ref) => {
   const editorRef = useRef(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null);
   const [showSaveStatus, setShowSaveStatus] = useState(false);
-  const autoSaveTimeoutRef = useRef(null);
 
   // Save function with status feedback
-  const saveFile = useCallback(async () => {
-    if (!file || !onSave) return;
+  const saveFile = useCallback(async ({ force = false } = {}) => {
+    if (!file || !onSave) {
+      return false;
+    }
+
+    if (!force && !hasUnsavedChanges) {
+      return false;
+    }
 
     try {
       setSaveStatus('saving');
       setShowSaveStatus(true);
-      
-      await onSave();
-      
+
+      const result = await onSave();
+
       setSaveStatus('saved');
       setHasUnsavedChanges(false);
       
@@ -73,7 +78,7 @@ const CodeEditor = ({ file, onChange, onSave, autoSave = true, autoSaveInterval 
       setTimeout(() => {
         setShowSaveStatus(false);
       }, 2000);
-      
+      return result !== false;
     } catch (error) {
       console.error('Error saving file:', error);
       setSaveStatus('error');
@@ -82,29 +87,9 @@ const CodeEditor = ({ file, onChange, onSave, autoSave = true, autoSaveInterval 
       setTimeout(() => {
         setShowSaveStatus(false);
       }, 3000);
+      throw error;
     }
-  }, [file, onSave]);
-
-  // Auto-save functionality
-  useEffect(() => {
-    if (autoSave && hasUnsavedChanges && file) {
-      // Clear existing timeout
-      if (autoSaveTimeoutRef.current) {
-        clearTimeout(autoSaveTimeoutRef.current);
-      }
-
-      // Set new timeout
-      autoSaveTimeoutRef.current = setTimeout(() => {
-        saveFile();
-      }, autoSaveInterval);
-    }
-
-    return () => {
-      if (autoSaveTimeoutRef.current) {
-        clearTimeout(autoSaveTimeoutRef.current);
-      }
-    };
-  }, [hasUnsavedChanges, autoSave, autoSaveInterval, saveFile, file]);
+  }, [file, onSave, hasUnsavedChanges]);
 
   const handleEditorDidMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -153,7 +138,9 @@ const CodeEditor = ({ file, onChange, onSave, autoSave = true, autoSaveInterval 
     // Add keyboard shortcuts
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       // Prevent browser default save behavior
-      saveFile();
+      saveFile({ force: true }).catch((error) => {
+        console.error('Manual save shortcut failed:', error);
+      });
     });
   };
 
@@ -167,6 +154,30 @@ const CodeEditor = ({ file, onChange, onSave, autoSave = true, autoSaveInterval 
   // Reset unsaved changes when file changes
   useEffect(() => {
     setHasUnsavedChanges(false);
+  }, [file?.id]);
+
+  useImperativeHandle(ref, () => ({
+    save: (options) => saveFile(options)
+  }), [saveFile]);
+
+  // Listen for Git update events to refresh current file
+  useEffect(() => {
+    const handleGitUpdate = () => {
+      if (file?.id) {
+        console.log('[CodeEditor] Git update detected, refreshing current file content');
+        // エディタの内容を最新のファイル内容で更新
+        // file objectが更新されると自動的にエディタも更新される
+        window.dispatchEvent(new CustomEvent('mindcode:refreshCurrentFile'));
+      }
+    };
+
+    window.addEventListener('mindcode:gitUpdated', handleGitUpdate);
+    window.addEventListener('mindcode:filesUpdated', handleGitUpdate);
+
+    return () => {
+      window.removeEventListener('mindcode:gitUpdated', handleGitUpdate);
+      window.removeEventListener('mindcode:filesUpdated', handleGitUpdate);
+    };
   }, [file?.id]);
 
   // Get save status text in Japanese
@@ -280,6 +291,6 @@ const CodeEditor = ({ file, onChange, onSave, autoSave = true, autoSaveInterval 
       </EditorWrapper>
     </EditorContainer>
   );
-};
+});
 
 export default CodeEditor;

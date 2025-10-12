@@ -57,8 +57,18 @@ CREATE TABLE IF NOT EXISTS claude_prompt_logs (
   project_id VARCHAR(36) NOT NULL,
   user_id INT NOT NULL,
   prompt TEXT NOT NULL,
+  duration_ms BIGINT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_layouts (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL UNIQUE,
+  layout JSON NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -82,3 +92,4 @@ CREATE INDEX idx_claude_sessions_project_id ON claude_sessions(project_id);
 CREATE INDEX idx_git_commits_project_id ON git_commits(project_id);
 CREATE INDEX idx_claude_prompt_logs_project_id ON claude_prompt_logs(project_id);
 CREATE INDEX idx_claude_prompt_logs_user_id ON claude_prompt_logs(user_id);
+CREATE INDEX idx_user_layouts_user_id ON user_layouts(user_id);
