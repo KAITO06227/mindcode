@@ -161,24 +161,32 @@ module.exports = (io) => {
       console.warn('Unable to prepare Claude CLI config:', error.message);
     });
     
-    // Determine shell based on platform
-    const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
-    
-    // Spawn PTY process
-    const ptyProcess = pty.spawn(shell, [], {
-      name: 'xterm-color',
-      cols: 80,
-      rows: 30,
-      cwd: workspaceDir,
-      env: {
-        ...process.env,
-        CLAUDE_API_KEY: process.env.CLAUDE_API_KEY,
-        ANTHROPIC_API_KEY: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY,
-        XDG_CONFIG_HOME: path.join(workspaceDir, '.config'),
-        CLAUDE_CONFIG_DIR: path.join(workspaceDir, '.config', 'claude'),
-        HOME: workspaceDir
-      }
-    });
+    // Determine Claude CLI binary based on platform
+    const claudeCommand = process.platform === 'win32' ? 'claude.cmd' : 'claude';
+
+    let ptyProcess;
+    try {
+      // Spawn Claude CLI directly so no other commands can execute
+      ptyProcess = pty.spawn(claudeCommand, [], {
+        name: 'xterm-color',
+        cols: 80,
+        rows: 30,
+        cwd: workspaceDir,
+        env: {
+          ...process.env,
+          CLAUDE_API_KEY: process.env.CLAUDE_API_KEY,
+          ANTHROPIC_API_KEY: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY,
+          XDG_CONFIG_HOME: path.join(workspaceDir, '.config'),
+          CLAUDE_CONFIG_DIR: path.join(workspaceDir, '.config', 'claude'),
+          HOME: workspaceDir
+        }
+      });
+    } catch (spawnError) {
+      console.error('❌ Failed to launch Claude CLI:', spawnError.message);
+      socket.emit('output', '\r\n❌ Claude CLI を起動できませんでした。サーバー管理者にお問い合わせください。\r\n');
+      socket.disconnect();
+      return;
+    }
 
     terminals[socket.id] = ptyProcess;
     inputBuffers[socket.id] = '';
@@ -188,20 +196,9 @@ module.exports = (io) => {
 
     // Handle PTY spawn event
     ptyProcess.on('spawn', () => {
-      console.log('✅ Terminal spawned for socket:', socket.id);
-      
-      setTimeout(() => {
-        // Check if Claude is available and show welcome message
-        checkClaudeAvailability().then(available => {
-          if (available) {
-            socket.emit('output', '\r\n✅ Claude Code が利用可能です\r\n');
-            socket.emit('output', `📁 作業ディレクトリ: ${workspaceDir}\r\n\r\n`);
-          } else {
-            socket.emit('output', '\r\n⚠️  Claude Code が見つかりません。インストールが必要です。\r\n');
-            socket.emit('output', '詳細: https://docs.anthropic.com/claude/docs/claude-code\r\n\r\n');
-          }
-        });
-      }, 500);
+      console.log('✅ Claude CLI spawned for socket:', socket.id);
+      socket.emit('output', '\r\n✅ Claude Code セッションを開始しました\r\n');
+      socket.emit('output', `📁 作業ディレクトリ: ${workspaceDir}\r\n`);
     });
 
     // Handle PTY data output
@@ -287,23 +284,22 @@ module.exports = (io) => {
   });
 };
 
-// Helper function to check Claude availability
+// Helper function retained for backwards compatibility in case other modules import it
 async function checkClaudeAvailability() {
   return new Promise((resolve) => {
-    const testProcess = spawn('claude', ['--version'], { 
-      stdio: 'pipe', 
-      shell: true 
+    const testProcess = spawn('claude', ['--version'], {
+      stdio: 'pipe',
+      shell: true
     });
-    
+
     testProcess.on('close', (code) => {
       resolve(code === 0);
     });
-    
+
     testProcess.on('error', () => {
       resolve(false);
     });
-    
-    // Timeout after 3 seconds
+
     setTimeout(() => {
       testProcess.kill();
       resolve(false);

@@ -14,7 +14,7 @@ class GitManager {
   }
 
   /**
-   * プロジェクトでGitリポジトリを初期化
+   * プロジェクトでトリップコードリポジトリを初期化
    */
   async initRepository(userName = 'WebIDE User', userEmail = 'webide@example.com') {
     try {
@@ -22,7 +22,7 @@ class GitManager {
       if (await this.isInitialized()) {
         return {
           success: true,
-          message: 'Git repository already initialized',
+          message: 'Tripcode repository already initialized',
           branch: 'main'
         };
       }
@@ -44,8 +44,12 @@ class GitManager {
       } catch (cleanupError) {
       }
 
-      // .gitignoreファイルを作成
-      const gitignore = `# WebIDE generated files
+      // 既存の .gitignore を尊重し、存在しないときのみテンプレートを作成
+      const gitignorePath = path.join(this.projectPath, '.gitignore');
+      try {
+        await fs.access(gitignorePath);
+      } catch (ignoreError) {
+        const gitignore = `# WebIDE generated files
 .DS_Store
 node_modules/
 *.log
@@ -54,7 +58,8 @@ node_modules/
 .config/
 .backup/
 `;
-      await fs.writeFile(path.join(this.projectPath, '.gitignore'), gitignore);
+        await fs.writeFile(gitignorePath, gitignore);
+      }
 
       // Git初期化（クリーンな状態から、テンプレート使用せず）
       const initResult = await execAsync('git init --initial-branch=main --template=""', { cwd: this.projectPath });
@@ -72,15 +77,15 @@ node_modules/
 
       return {
         success: true,
-        message: 'Git repository initialized successfully',
+        message: 'Tripcode repository initialized successfully',
         branch: 'main'
       };
     } catch (error) {
-      console.error('Git initialization error:', error);
+      console.error('Tripcode initialization error:', error);
       console.error('Error stdout:', error.stdout);
       console.error('Error stderr:', error.stderr);
       console.error('Project path:', this.projectPath);
-      throw new Error(`Git initialization failed: ${error.message}. Stdout: ${error.stdout || 'none'}. Stderr: ${error.stderr || 'none'}`);
+      throw new Error(`Tripcode repository initialization failed: ${error.message}. Stdout: ${error.stdout || 'none'}. Stderr: ${error.stderr || 'none'}`);
     }
   }
 
@@ -104,7 +109,7 @@ node_modules/
       await execAsync(`git add "${filePath}"`, { cwd: this.projectPath });
       return { success: true };
     } catch (error) {
-      throw new Error(`Failed to add file to git: ${error.message}`);
+      throw new Error(`Failed to add file to Tripcode repository: ${error.message}`);
     }
   }
 
@@ -152,12 +157,22 @@ node_modules/
         return;
       }
 
-      throw new Error('Git index.lock file exists. Another git process may be running.');
+      throw new Error('Tripcode index.lock file exists. Another git process may be running.');
     } catch (error) {
       if (error.code === 'ENOENT') {
         return; // No lock file
       }
       throw error;
+    }
+  }
+
+  async clearIndexLock() {
+    try {
+      await fs.unlink(this.indexLockPath);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
     }
   }
 
@@ -168,9 +183,11 @@ node_modules/
     try {
       const { stdout } = await execAsync('git status --porcelain', { cwd: this.projectPath });
       const { stdout: branch } = await execAsync('git branch --show-current', { cwd: this.projectPath });
+      const { stdout: head } = await execAsync('git rev-parse HEAD', { cwd: this.projectPath });
       
       return {
         branch: branch.trim(),
+        head: head.trim(),
         hasChanges: stdout.trim().length > 0,
         changes: stdout.trim().split('\n').filter(line => line.length > 0)
       };
@@ -184,10 +201,9 @@ node_modules/
    */
   async getCommitHistory(limit = 20) {
     try {
-      const { stdout } = await execAsync(
-        `git log --oneline --max-count=${limit} --pretty=format:"%H|%an|%ae|%ad|%s" --date=iso`,
-        { cwd: this.projectPath }
-      );
+      const limitArg = Number.isFinite(limit) && limit > 0 ? `--max-count=${limit}` : '';
+      const command = `git log --oneline ${limitArg} --pretty=format:"%H|%an|%ae|%ad|%s" --date=iso`;
+      const { stdout } = await execAsync(command.trim(), { cwd: this.projectPath });
 
       const commits = stdout.trim().split('\n').map(line => {
         const [hash, author, email, date, message] = line.split('|');

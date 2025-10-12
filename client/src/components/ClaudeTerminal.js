@@ -13,7 +13,6 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
   const socketRef = useRef(null);
   // Track command activity without retriggering effect
   const claudeCommandActiveRef = useRef(false);
-  const autoStartedRef = useRef(false);
 
 
   // Initialize terminal and socket connection
@@ -93,21 +92,11 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
       terminal.writeln('\r\n🤖 MindCode Terminal に接続しました');
       terminal.writeln('ターミナルを初期化中...\r\n');
 
-      if (!autoStartedRef.current) {
-        autoStartedRef.current = true;
-        setTimeout(() => {
-          if (socketRef.current) {
-            console.log('Auto-starting Claude CLI...');
-            socketRef.current.emit('input', 'claude\n');
-          }
-        }, 300);
-      }
     });
 
     socket.on('disconnect', (reason) => {
       console.log('❌ Socket.IO disconnected:', reason);
       terminal.writeln('\r\n\x1b[31m接続が切断されました\x1b[0m\r\n');
-      autoStartedRef.current = false;
     });
 
     // Auto-sync filesystem after Claude Code commands
@@ -140,7 +129,7 @@ const ClaudeTerminal = ({ projectId, userToken }) => {
       }
       
       // Detect when Claude Code command ends (prompt returns)
-      if (claudeCommandActiveRef.current && (outputText.includes('$') || outputText.includes('>'))) {
+      if (claudeCommandActiveRef.current && (outputText.includes('$') || outputText.includes('>') || outputText.includes('You:'))) {
         claudeCommandActiveRef.current = false;
         console.log('Claude Code command completed, triggering auto-sync...');
         

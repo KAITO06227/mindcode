@@ -4,6 +4,8 @@ const db = require('../database/connection');
 const GitManager = require('../utils/gitManager');
 const path = require('path');
 const fs = require('fs').promises;
+const { resolveExistingProjectPath } = require('../utils/userWorkspace');
+const { commitPromptStore } = require('../sockets/claudeSocketSimple');
 
 const router = express.Router();
 
@@ -35,7 +37,7 @@ async function getOrCreateGitRepo(projectId, userId) {
   }
 }
 
-// POST /api/version-control/:projectId/init - Initialize Git repository
+// POST /api/version-control/:projectId/init - Initialize Tripcode repository
 router.post('/:projectId/init', verifyToken, async (req, res) => {
   try {
     const { projectId } = req.params;
@@ -51,12 +53,13 @@ router.post('/:projectId/init', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     // Check if already initialized
     if (await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository already initialized' });
+      return res.status(400).json({ message: 'トリップコードリポジトリは既に初期化されています' });
     }
 
     // Initialize repository
@@ -78,20 +81,20 @@ router.post('/:projectId/init', verifyToken, async (req, res) => {
     );
 
     res.json({
-      message: 'Git repository initialized successfully',
-      ...result
+      ...result,
+      message: 'トリップコードリポジトリを初期化しました'
     });
 
   } catch (error) {
-    console.error('Error initializing Git repository:', error);
+    console.error('Error initializing Tripcode repository:', error);
     res.status(500).json({ 
-      message: 'Error initializing Git repository',
+      message: 'トリップコードリポジトリの初期化に失敗しました',
       error: error.message 
     });
   }
 });
 
-// GET /api/version-control/:projectId/status - Get Git status
+// GET /api/version-control/:projectId/status - Get Tripcode status
 router.get('/:projectId/status', verifyToken, async (req, res) => {
   try {
     const { projectId } = req.params;
@@ -106,12 +109,13 @@ router.get('/:projectId/status', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     if (!await gitManager.isInitialized()) {
       return res.status(400).json({ 
-        message: 'Git repository not initialized',
+        message: 'トリップコードリポジトリが初期化されていません',
         initialized: false 
       });
     }
@@ -126,9 +130,9 @@ router.get('/:projectId/status', verifyToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error getting Git status:', error);
+    console.error('Error getting Tripcode status:', error);
     res.status(500).json({ 
-      message: 'Error getting Git status',
+      message: 'トリップコードの状態取得に失敗しました',
       error: error.message 
     });
   }
@@ -154,11 +158,17 @@ router.post('/:projectId/commit', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     if (!await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository not initialized' });
+      return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
+    }
+
+    const status = await gitManager.getStatus();
+    if (!status?.hasChanges) {
+      return res.json({ success: false, message: 'No changes to commit' });
     }
 
     // Add files to staging area
@@ -243,28 +253,40 @@ router.get('/:projectId/history', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     if (!await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository not initialized' });
+      return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
     // Get history from Git
-    const gitHistory = await gitManager.getCommitHistory(parseInt(limit));
-    
+    let historyLimit = null;
+    if (typeof limit === 'string' && limit.toLowerCase() !== 'all') {
+      const parsed = parseInt(limit, 10);
+      historyLimit = Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+    } else if (typeof limit !== 'string') {
+      const parsed = parseInt(limit, 10);
+      historyLimit = Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+    }
+
+    const gitHistory = await gitManager.getCommitHistory(historyLimit);
+
     // Get additional info from database
-    const limitValue = parseInt(limit) || 20;
-    const [dbCommits] = await db.execute(`
+    let dbQuery = `
       SELECT commit_hash, commit_message, commit_author, commit_date, created_at
       FROM git_commits 
       WHERE project_id = ? 
-      ORDER BY commit_date DESC 
-      LIMIT ${limitValue}`,
-      [projectId]
-    );
+      ORDER BY commit_date DESC`;
+    const params = [projectId];
+    if (historyLimit !== null) {
+      dbQuery += ' LIMIT ?';
+      params.push(historyLimit);
+    }
+    const [dbCommits] = await db.execute(dbQuery, params);
 
-    // Merge Git and database information
+    // Merge Tripcode and database information
     const history = gitHistory.map(gitCommit => {
       const dbCommit = dbCommits.find(db => db.commit_hash === gitCommit.hash);
       return {
@@ -282,6 +304,46 @@ router.get('/:projectId/history', verifyToken, async (req, res) => {
       message: 'Error getting commit history',
       error: error.message 
     });
+  }
+});
+
+// GET /api/version-control/:projectId/commit-prompts - Get stored prompts for commits
+router.get('/:projectId/commit-prompts', verifyToken, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const hashesParam = req.query.hashes;
+
+    const [projects] = await db.execute(
+      'SELECT id FROM projects WHERE id = ? AND user_id = ?',
+      [projectId, req.user.id]
+    );
+
+    if (projects.length === 0) {
+      return res.status(404).json({ message: 'Project not found or access denied' });
+    }
+
+    if (!hashesParam) {
+      return res.json({});
+    }
+
+    const hashes = hashesParam
+      .split(',')
+      .map((hash) => hash.trim())
+      .filter(Boolean);
+
+    const response = {};
+
+    hashes.forEach((hash) => {
+      const storeEntry = commitPromptStore?.[hash];
+      if (storeEntry && storeEntry.projectId === projectId) {
+        response[hash] = storeEntry.prompts;
+      }
+    });
+
+    return res.json(response);
+  } catch (error) {
+    console.error('Error getting commit prompts:', error);
+    return res.status(500).json({ message: 'Error getting commit prompts', error: error.message });
   }
 });
 
@@ -305,11 +367,12 @@ router.get('/:projectId/diff', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     if (!await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository not initialized' });
+      return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
     const diff = await gitManager.getDiff(filePath, commitHash);
@@ -351,11 +414,12 @@ router.get('/:projectId/file-at-commit', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     if (!await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository not initialized' });
+      return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
     const content = await gitManager.getFileAtCommit(filePath, commitHash);
@@ -394,11 +458,12 @@ router.get('/:projectId/branches', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     if (!await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository not initialized' });
+      return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
     const branches = await gitManager.getBranches();
@@ -434,11 +499,12 @@ router.post('/:projectId/checkout', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     if (!await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository not initialized' });
+      return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
     const result = await gitManager.switchBranch(branchName);
@@ -482,11 +548,12 @@ router.post('/:projectId/restore', verifyToken, async (req, res) => {
       return res.status(404).json({ message: 'Project not found or access denied' });
     }
 
-    const projectPath = path.join(__dirname, '../../user_projects', req.user.id.toString(), projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
     if (!await gitManager.isInitialized()) {
-      return res.status(400).json({ message: 'Git repository not initialized' });
+      return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
     // Get list of files in the commit
