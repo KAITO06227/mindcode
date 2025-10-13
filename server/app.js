@@ -40,7 +40,6 @@ const claudeRoutes = require('./routes/claude');
 const adminRoutes = require('./routes/admin');
 const fileSystemRoutes = require('./routes/fileSystem');
 const versionControlRoutes = require('./routes/versionControl');
-// const snapshotRoutes = require('./routes/snapshots');
 const userSettingsRoutes = require('./routes/userSettings');
 const userProjectStaticRoutes = require('./routes/userProjectStatic');
 const { initFileTreeEvents } = require('./sockets/fileTreeEvents');
@@ -51,7 +50,6 @@ app.use('/api/claude', claudeRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/filesystem', fileSystemRoutes); // New filesystem API
 app.use('/api/version-control', versionControlRoutes); // New Git API
-// app.use('/api/snapshots', snapshotRoutes); // Snapshot management API (temporarily disabled)
 app.use('/api/user-settings', userSettingsRoutes);
 app.use('/user_projects', userProjectStaticRoutes);
 

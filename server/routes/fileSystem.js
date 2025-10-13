@@ -5,7 +5,6 @@ const fs = require('fs').promises;
 const path = require('path');
 const multer = require('multer');
 const GitManager = require('../utils/gitManager');
-// const SnapshotManager = require('../utils/snapshotManager');
 const crypto = require('crypto');
 const { resolveExistingProjectPath } = require('../utils/userWorkspace');
 
@@ -256,10 +255,6 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
       });
     }
 
-    // スナップショット機能は一時的に無効化
-    // const createSnapshot = req.body.createSnapshot || req.query.createSnapshot;
-    let snapshotInfo = null;
-
     res.status(isUpdate ? 200 : 201).json({
       id: fileId,
       filePath: relativeFilePath,
@@ -268,8 +263,7 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
       checksum,
       fileType,
       isUpdate,
-      isFolder: false,
-      snapshot: snapshotInfo
+      isFolder: false
     });
 
   } catch (error) {
@@ -281,7 +275,7 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
   }
 });
 
-// プロジェクト保存エンドポイントは一時的に無効化（スナップショット機能と一緒に）
+// プロジェクト保存エンドポイントは無効化された状態のまま
 // router.post('/:projectId/save', verifyToken, async (req, res) => { ... });
 
 // GET /api/filesystem/:projectId/files/:fileId - Get file content and metadata
