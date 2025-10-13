@@ -22,6 +22,8 @@ function ensureSessionState(sessionKey, defaultProvider) {
       prompts: [],
       provider: defaultProvider,
       awaitingApproval: false,
+      approvalWaitStartTime: null,
+      totalApprovalWaitMs: 0,
       lastPromptStartedAt: null,
       responsePending: false,
       finalizedPromptIds: new Set(),
@@ -32,6 +34,28 @@ function ensureSessionState(sessionKey, defaultProvider) {
     };
   }
   return sessionState[sessionKey];
+}
+
+function beginApprovalWait(state) {
+  if (!state || state.awaitingApproval) {
+    return;
+  }
+  state.awaitingApproval = true;
+  state.approvalWaitStartTime = Date.now();
+}
+
+function endApprovalWait(state) {
+  if (!state || !state.awaitingApproval) {
+    return;
+  }
+  if (typeof state.approvalWaitStartTime === 'number') {
+    const elapsed = Date.now() - state.approvalWaitStartTime;
+    if (Number.isFinite(elapsed) && elapsed > 0) {
+      state.totalApprovalWaitMs = (state.totalApprovalWaitMs || 0) + elapsed;
+    }
+  }
+  state.awaitingApproval = false;
+  state.approvalWaitStartTime = null;
 }
 
 function getProjectKey(userId, projectId) {
@@ -396,6 +420,10 @@ module.exports = (io) => {
         return;
       }
 
+      if (state.awaitingApproval) {
+        endApprovalWait(state);
+      }
+
       // タイマーをクリア
       if (state.responseCompleteTimer) {
         clearTimeout(state.responseCompleteTimer);
@@ -448,11 +476,20 @@ module.exports = (io) => {
 
       // actualDurationMsが設定されていればそれを使用（2秒の待機時間を引いた正確な時間）
       // 設定されていなければ従来通りの計算
-      const durationMs = state.actualDurationMs !== null && state.actualDurationMs !== undefined
+      let durationMs = state.actualDurationMs !== null && state.actualDurationMs !== undefined
         ? state.actualDurationMs
         : (state.prompts?.[state.prompts.length - 1]
           ? Math.max(0, Date.now() - (state.prompts[state.prompts.length - 1].startedAt || state.startTime))
           : null);
+
+      if (typeof durationMs === 'number') {
+        const approvalWaitMs = state.totalApprovalWaitMs || 0;
+        if (approvalWaitMs > 0) {
+          durationMs = Math.max(0, durationMs - approvalWaitMs);
+        }
+      }
+      state.totalApprovalWaitMs = 0;
+      state.approvalWaitStartTime = null;
 
       // プロンプトログをデータベースに保存
       if (promptTexts.length > 0) {
@@ -659,10 +696,11 @@ module.exports = (io) => {
         terminalScreenBuffer = terminalScreenBuffer.slice(-MAX_BUFFER_SIZE);
       }
 
-      // 画面バッファ全体で"esc to interrupt"の有無をチェック
+      // 画面バッファ全体で"esc to interrupt"/"esc to cancel"の有無をチェック
       const state = sessionState[socket.id];
       if (state) {
         const bufferLower = terminalScreenBuffer.toLowerCase();
+        // Claude: "esc to interrupt", Codex: "esc to interrupt", Gemini: "esc to cancel"
         const screenHasEscToInterrupt = bufferLower.includes('esc to interrupt') || bufferLower.includes('esc to cancel');
 
         if (screenHasEscToInterrupt) {
@@ -677,7 +715,8 @@ module.exports = (io) => {
             clearTimeout(state.responseCompleteTimer);
             state.responseCompleteTimer = null;
           }
-        } else if (state.escToInterruptVisible) {
+        } else if (state.escToInterruptVisible && !state.awaitingApproval) {
+          // 認証待ち中は"esc to"の消失を無視（認証画面で"esc to"が消えるため）
           // 以前は表示されていたが、今は画面から消えた可能性
           // ただし、長い応答でバッファから押し出された可能性もあるので、2秒待つ
 
@@ -688,6 +727,12 @@ module.exports = (io) => {
 
           // 2秒待って、まだ"esc to interrupt"がなければ完了とみなす
           state.responseCompleteTimer = setTimeout(() => {
+            // 認証待ち状態になっている場合はスキップ
+            if (state.awaitingApproval) {
+              state.responseCompleteTimer = null;
+              return;
+            }
+
             // 再度バッファをチェック
             const finalBufferCheck = terminalScreenBuffer.toLowerCase();
             const stillHasEscToInterrupt = finalBufferCheck.includes('esc to interrupt') || finalBufferCheck.includes('esc to cancel');
@@ -701,8 +746,13 @@ module.exports = (io) => {
               state.escToInterruptStartTime = null;
               state.responseCompleteTimer = null;
 
+              const approvalWaitMs = state.totalApprovalWaitMs || 0;
+              const adjustedDuration = Math.max(0, displayDuration - approvalWaitMs);
+
               // 実際の処理時間をstateに保存（finalizeSessionで使用）
-              state.actualDurationMs = displayDuration;
+              state.actualDurationMs = adjustedDuration;
+              state.totalApprovalWaitMs = 0;
+              state.approvalWaitStartTime = null;
 
               // Codexの場合、state.promptsは空でもhistory.jsonlにプロンプトが記録されている可能性があるため
               // responsePendingがtrueであれば自動コミットを実行
@@ -770,7 +820,7 @@ module.exports = (io) => {
           'always yes',
           'use arrow keys',
           'select an option',
-          'apply this change?',
+          'waiting for user confirmation',
           '1. yes',
           '2. yes, allow all edits',
           '3. no, and tell claude'
@@ -782,12 +832,12 @@ module.exports = (io) => {
           normalizedChoicePrefix.startsWith('│ ❯ 1. yes') ||
           normalizedChoicePrefix.startsWith('│   1. yes')
         ) {
-          state.awaitingApproval = true;
+          beginApprovalWait(state);
           return;
         }
 
         if (state.awaitingApproval && /press enter/.test(lowerText)) {
-          state.awaitingApproval = false;
+          endApprovalWait(state);
           state.responsePending = true;
           return;
         }
@@ -818,7 +868,7 @@ module.exports = (io) => {
       inputBuffers[socket.id] += stringData;
 
       if (currentState.awaitingApproval && stringData.includes('\r')) {
-        currentState.awaitingApproval = false;
+        endApprovalWait(currentState);
         currentState.responsePending = true;
       }
 
@@ -834,7 +884,7 @@ module.exports = (io) => {
 
           if (cleaned.length === 0) {
             if (state.awaitingApproval) {
-              state.awaitingApproval = false;
+              endApprovalWait(state);
               state.responsePending = true;
             }
             continue;
@@ -874,7 +924,7 @@ module.exports = (io) => {
           ]);
 
           if (state.awaitingApproval && approvalResponses.has(normalizedText)) {
-            state.awaitingApproval = false;
+            endApprovalWait(state);
             continue;
           }
 
