@@ -38,20 +38,24 @@ function ensureSessionState(sessionKey, defaultProvider) {
 
 function beginApprovalWait(state) {
   if (!state || state.awaitingApproval) {
+    console.log(`[自動コミット/認証] beginApprovalWait スキップ (state=${!!state}, awaitingApproval=${state?.awaitingApproval})`);
     return;
   }
+  console.log(`[自動コミット/認証] ✅ 認証待ち開始 (awaitingApproval: false → true)`);
   state.awaitingApproval = true;
   state.approvalWaitStartTime = Date.now();
 }
 
 function endApprovalWait(state) {
   if (!state || !state.awaitingApproval) {
+    console.log(`[自動コミット/認証] endApprovalWait スキップ (state=${!!state}, awaitingApproval=${state?.awaitingApproval})`);
     return;
   }
   if (typeof state.approvalWaitStartTime === 'number') {
     const elapsed = Date.now() - state.approvalWaitStartTime;
     if (Number.isFinite(elapsed) && elapsed > 0) {
       state.totalApprovalWaitMs = (state.totalApprovalWaitMs || 0) + elapsed;
+      console.log(`[自動コミット/認証] ✅ 認証待ち終了 (待機時間: ${elapsed}ms, 累計: ${state.totalApprovalWaitMs}ms)`);
     }
   }
   state.awaitingApproval = false;
@@ -175,7 +179,7 @@ async function ensureClaudeCliConfig(homeDir, apiKey) {
 
     await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
   } catch (error) {
-    console.warn('Failed to ensure Claude CLI config:', error.message);
+    // Silent failure - will be handled by CLI itself
   }
 }
 
@@ -251,14 +255,12 @@ module.exports = (io) => {
     const { projectId, token } = socket.handshake.query;
 
     if (!projectId) {
-      console.error('❌ No project ID provided');
       socket.emit('claude_error', { message: 'Project ID is required' });
       socket.disconnect();
       return;
     }
 
     if (!token) {
-      console.error('❌ No auth token provided');
       socket.emit('claude_error', { message: 'Authentication required' });
       socket.disconnect();
       return;
@@ -269,7 +271,6 @@ module.exports = (io) => {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       userId = decoded?.id;
     } catch (error) {
-      console.error('❌ Invalid auth token:', error.message);
       socket.emit('claude_error', { message: 'Invalid authentication token' });
       socket.disconnect();
       return;
@@ -294,7 +295,6 @@ module.exports = (io) => {
       }
       projectRecord = projects[0];
     } catch (projectError) {
-      console.error('❌ Failed to verify project ownership:', projectError);
       socket.emit('claude_error', { message: 'Failed to verify project access' });
       socket.disconnect();
       return;
@@ -310,7 +310,7 @@ module.exports = (io) => {
         userInfo = userRows[0];
       }
     } catch (userError) {
-      console.warn('Failed to load user info for commits:', userError.message);
+      // User info is optional for commits
     }
 
     // Create project workspace directory
@@ -337,7 +337,6 @@ module.exports = (io) => {
     try {
       preparation = await providerConfig.prepare({ workspaceDir, homeDir });
     } catch (prepError) {
-      console.error(`❌ Failed to prepare ${providerConfig.displayName} CLI:`, prepError.message);
       socket.emit(
         'output',
         `\r\n❌ ${providerConfig.displayName} の準備に失敗しました。サーバー管理者にお問い合わせください。\r\n`
@@ -360,6 +359,11 @@ module.exports = (io) => {
     let autoApprovalHandled = false;
     let codexApiKeyInputPending = false;
     let codexOutputBuffer = '';
+    let claudeAuthCodeInputPending = false;
+    let claudeAuthCodeBuffer = '';
+    let claudeApiKeyConfirmPending = false;
+    let claudeApiKeyConfirmBuffer = '';
+    let claudeLoginSuccessful = false;
     try {
       // Spawn the selected AI CLI directly so no other commands can execute
       ptyProcess = pty.spawn(providerConfig.command, [], {
@@ -377,8 +381,6 @@ module.exports = (io) => {
         }
       });
     } catch (spawnError) {
-      console.error(`❌ Failed to launch ${providerConfig.displayName} CLI:`, spawnError.message);
-
       let errorMessage = `\r\n❌ ${providerConfig.displayName} CLI を起動できませんでした。サーバー管理者にお問い合わせください。\r\n`;
 
       if (spawnError.code === 'ENOENT' || /ENOENT/.test(spawnError.message)) {
@@ -401,10 +403,119 @@ module.exports = (io) => {
     let terminalScreenBuffer = '';
     const MAX_BUFFER_SIZE = 2000; // 最新の2000文字のみ保持（"esc to"を含む領域）
 
+    // 定期的にバッファをチェック（出力がなくても消失を検知するため）
+    // プロンプト送信後、3つの変数(escToInterruptVisible, awaitingApproval, responsePending)が
+    // すべてfalseになるまで監視を継続
+    let bufferCheckInterval = null;
+    const startBufferPolling = () => {
+      if (bufferCheckInterval) return;
+
+      bufferCheckInterval = setInterval(() => {
+        const state = sessionState[socket.id];
+        if (!state) {
+          return;
+        }
+
+        // プロンプトが送信されていない場合は監視不要
+        if (!state.responsePending) {
+          return;
+        }
+
+        // ANSIエスケープシーケンスを除去してから検索
+        const cleanBuffer = terminalScreenBuffer.replace(/\x1b\[[0-9;]*m/g, '');
+        const bufferLower = cleanBuffer.toLowerCase();
+        const screenHasEscToInterrupt = bufferLower.includes('esc to interrupt') || bufferLower.includes('esc to cancel');
+
+        console.log(`[自動コミット/ポーリング] 3変数監視: escToInterruptVisible=${state.escToInterruptVisible}, awaitingApproval=${state.awaitingApproval}, responsePending=${state.responsePending}, screenHasEscToInterrupt=${screenHasEscToInterrupt}`);
+
+        // "esc to interrupt"が画面に表示されている場合
+        if (screenHasEscToInterrupt) {
+          if (!state.escToInterruptVisible) {
+            console.log(`[自動コミット/ポーリング] "esc to interrupt"表示検知 (escToInterruptVisible: false → true)`);
+            state.escToInterruptVisible = true;
+            state.escToInterruptStartTime = Date.now();
+          }
+          // タイマーをクリア（まだAI応答中）
+          if (state.responseCompleteTimer) {
+            clearTimeout(state.responseCompleteTimer);
+            state.responseCompleteTimer = null;
+          }
+          return;
+        }
+
+        // "esc to interrupt"が消失している場合（認証待ち中は除く）
+        if (state.escToInterruptVisible && !state.awaitingApproval) {
+          console.log(`[自動コミット/ポーリング] "esc to interrupt"消失検知 - 2秒タイマー開始`);
+
+          // 既存のタイマーをクリア
+          if (state.responseCompleteTimer) {
+            clearTimeout(state.responseCompleteTimer);
+          }
+
+          // 2秒待って、まだ"esc to interrupt"がなければ完了とみなす
+          state.responseCompleteTimer = setTimeout(() => {
+            console.log(`[自動コミット/タイマー] 2秒タイマー発火 (awaitingApproval: ${state.awaitingApproval})`);
+
+            // 認証待ち状態になっている場合はスキップ
+            if (state.awaitingApproval) {
+              console.log(`[自動コミット/タイマー] 認証待ち中のため自動コミットをスキップ`);
+              state.responseCompleteTimer = null;
+              return;
+            }
+
+            // 再度バッファをチェック
+            const cleanFinalBuffer = terminalScreenBuffer.replace(/\x1b\[[0-9;]*m/g, '');
+            const finalBufferCheck = cleanFinalBuffer.toLowerCase();
+            const stillHasEscToInterrupt = finalBufferCheck.includes('esc to interrupt') || finalBufferCheck.includes('esc to cancel');
+            console.log(`[自動コミット/タイマー] 最終バッファチェック: stillHasEscToInterrupt=${stillHasEscToInterrupt}`);
+
+            if (!stillHasEscToInterrupt) {
+              const displayDuration = state.escToInterruptStartTime
+                ? Math.max(0, Date.now() - state.escToInterruptStartTime - 2000)
+                : 0;
+
+              state.escToInterruptVisible = false;
+              state.escToInterruptStartTime = null;
+              state.responseCompleteTimer = null;
+
+              const approvalWaitMs = state.totalApprovalWaitMs || 0;
+              const adjustedDuration = Math.max(0, displayDuration - approvalWaitMs);
+
+              state.actualDurationMs = adjustedDuration;
+              state.totalApprovalWaitMs = 0;
+              state.approvalWaitStartTime = null;
+
+              console.log(`[自動コミット] "esc to interrupt"消失検知、2秒待機完了 (adjustedDuration: ${adjustedDuration}ms)`);
+              console.log(`[自動コミット/3変数確認] 最終状態: escToInterruptVisible=${state.escToInterruptVisible}, awaitingApproval=${state.awaitingApproval}, responsePending=${state.responsePending}`);
+
+              if (state.responsePending) {
+                console.log(`[自動コミット] responsePending=true、finalizeSessionを呼び出し`);
+                finalizeSession({ reason: 'response-complete' }).catch((err) => {
+                  console.log(`[自動コミット] finalizeSession実行エラー: ${err.message}`);
+                });
+              } else {
+                console.log(`[自動コミット] responsePending=false、finalizeSessionをスキップ`);
+              }
+            } else {
+              state.responseCompleteTimer = null;
+            }
+          }, 2000);
+        }
+      }, 500); // 500ミリ秒ごとにチェック
+    };
+
+    const stopBufferPolling = () => {
+      if (bufferCheckInterval) {
+        clearInterval(bufferCheckInterval);
+        bufferCheckInterval = null;
+      }
+    };
+
     // Handle PTY spawn event
     ptyProcess.on('spawn', () => {
       socket.emit('output', `\r\n✅ ${providerConfig.displayName} セッションを開始しました\r\n`);
       socket.emit('output', `📁 作業ディレクトリ: ${workspaceDir}\r\n`);
+      startBufferPolling(); // ポーリング開始
     });
 
     const projectKey = getProjectKey(userId, projectId);
@@ -413,10 +524,14 @@ module.exports = (io) => {
       const sessionKey = socket.id;
       const state = sessionState[sessionKey];
       if (!state) {
+        console.log(`[自動コミット] finalizeSession呼び出し失敗: stateが存在しません (reason: ${reason})`);
         return;
       }
 
+      console.log(`[自動コミット] finalizeSession開始 (reason: ${reason}, awaitingApproval: ${state.awaitingApproval}, responsePending: ${state.responsePending})`);
+
       if (state.awaitingApproval && !['exit', 'response-complete'].includes(reason)) {
+        console.log(`[自動コミット] 承認待ち中のためfinalizeSessionをスキップ`);
         return;
       }
 
@@ -434,13 +549,16 @@ module.exports = (io) => {
       state.escToInterruptVisible = false;
       state.escToInterruptStartTime = null;
 
-      // Codexの場合、history.jsonlから実際のプロンプトを抽出
+      // Claude / Codexの場合、history.jsonlから実際のプロンプトを抽出
       let promptTexts = [];
+      console.log(`[自動コミット] プロバイダー: ${providerKey}, state.prompts数: ${state.prompts.length}`);
+
       if (providerKey === 'codex') {
         try {
           const historyPath = path.join(homeDir, '.codex', 'history.jsonl');
           const historyContent = await fs.readFile(historyPath, 'utf8');
           const lines = historyContent.trim().split('\n');
+          console.log(`[自動コミット] Codex履歴ファイル読み込み成功: ${lines.length}行`);
 
           // state.promptsに記録されている最初のプロンプトのタイムスタンプを基準にする
           // もしstate.promptsが空なら、セッション開始時刻の少し前（30秒）から取得
@@ -460,16 +578,73 @@ module.exports = (io) => {
                 promptTexts.push(entry.text);
               }
             } catch (parseError) {
-              console.warn('Failed to parse history line:', parseError.message);
+              // Skip invalid history lines
             }
           }
+          console.log(`[自動コミット] Codex履歴から抽出したプロンプト数: ${promptTexts.length}`);
         } catch (readError) {
-          console.warn('Failed to read Codex history, falling back to session prompts:', readError.message);
+          console.log(`[自動コミット] Codex履歴ファイル読み込み失敗、state.promptsにフォールバック`);
+          const promptsFromSession = state.prompts || [];
+          promptTexts = promptsFromSession.map(entry => entry.text);
+        }
+      } else if (providerKey === 'claude') {
+        try {
+          const historyPath = path.join(homeDir, '.config', 'claude', 'history.jsonl');
+          const historyContent = await fs.readFile(historyPath, 'utf8');
+          const lines = historyContent.trim().split('\n');
+          console.log(`[自動コミット] Claude履歴ファイル読み込み成功: ${lines.length}行`);
+
+          // state.promptsに記録されている最初のプロンプトのタイムスタンプを基準にする
+          // もしstate.promptsが空なら、セッション開始時刻の少し前（30秒）から取得
+          // NOTE: history.jsonlのtimestampはミリ秒単位
+          let filterStartTimeMs;
+          if (state.prompts.length > 0 && state.prompts[0].startedAt) {
+            // 最初のプロンプトの1秒前から取得（タイミングのズレを吸収）
+            filterStartTimeMs = state.prompts[0].startedAt - 1000;
+            console.log(`[自動コミット/履歴] フィルタ開始時刻: ${filterStartTimeMs}ms (state.prompts[0].startedAtベース)`);
+          } else {
+            // セッション開始の30秒前から取得（広めに取る）
+            filterStartTimeMs = state.startTime - 30000;
+            console.log(`[自動コミット/履歴] フィルタ開始時刻: ${filterStartTimeMs}ms (state.startTimeベース、30秒前)`);
+          }
+
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line);
+              // デバッグ: エントリの構造を確認
+              console.log(`[自動コミット/履歴] エントリ全体:`, JSON.stringify(entry));
+
+              // Claude Code history.jsonlの実際のフォーマット:
+              // {display: string, pastedContents: {}, timestamp: number (ms), project: string}
+              let timestamp = entry.timestamp || entry.ts || entry.time || entry.created_at;
+              let text = entry.display || entry.text || entry.prompt || entry.message || entry.content;
+
+              console.log(`[自動コミット/履歴] 抽出結果: timestamp=${timestamp}, filterStartTimeMs=${filterStartTimeMs}, match=${timestamp >= filterStartTimeMs}, text="${text?.substring(0, 50)}..."`);
+
+              if (timestamp >= filterStartTimeMs && text) {
+                promptTexts.push(text);
+                console.log(`[自動コミット/履歴] ✅ プロンプト追加: "${text.substring(0, 50)}..."`);
+              }
+            } catch (parseError) {
+              console.log(`[自動コミット/履歴] JSONパースエラー: ${parseError.message}`);
+            }
+          }
+          console.log(`[自動コミット] Claude履歴から抽出したプロンプト数: ${promptTexts.length}`);
+
+          // history.jsonlから抽出できなかった場合は、state.promptsにフォールバック
+          if (promptTexts.length === 0 && state.prompts.length > 0) {
+            console.log(`[自動コミット] history.jsonlから抽出できなかったため、state.promptsにフォールバック`);
+            const promptsFromSession = state.prompts || [];
+            promptTexts = promptsFromSession.map(entry => entry.text);
+          }
+        } catch (readError) {
+          console.log(`[自動コミット] Claude履歴ファイル読み込み失敗: ${readError.message}、state.promptsにフォールバック`);
           const promptsFromSession = state.prompts || [];
           promptTexts = promptsFromSession.map(entry => entry.text);
         }
       } else {
-        // Claude / Gemini の場合は従来通り
+        // Gemini の場合は従来通り
+        console.log(`[自動コミット] Gemini: state.promptsから取得`);
         const promptsFromSession = state.prompts || [];
         promptTexts = promptsFromSession.map(entry => entry.text);
       }
@@ -493,8 +668,8 @@ module.exports = (io) => {
 
       // プロンプトログをデータベースに保存
       if (promptTexts.length > 0) {
-        // Codexの場合、history.jsonlから取得したプロンプトを保存
-        if (providerKey === 'codex') {
+        // Claude / Codexの場合、history.jsonlから取得したプロンプトを保存
+        if (providerKey === 'codex' || providerKey === 'claude') {
           for (const promptText of promptTexts) {
             try {
               await db.execute(
@@ -502,11 +677,11 @@ module.exports = (io) => {
                 [projectId, userId, promptText, durationMs]
               );
             } catch (logError) {
-              console.warn('Failed to record Codex prompt log:', logError.message);
+              // Silent failure - prompt log is not critical
             }
           }
         } else {
-          // Claude / Gemini の場合は従来通り
+          // Gemini の場合は従来通り
           const promptsFromSession = state.prompts || [];
           for (const entry of promptsFromSession) {
             if (state.finalizedPromptIds.has(entry.id)) {
@@ -520,7 +695,7 @@ module.exports = (io) => {
               );
               state.finalizedPromptIds.add(entry.id);
             } catch (logError) {
-              console.warn('Failed to record prompt log:', logError.message);
+              // Silent failure - prompt log is not critical
             }
           }
         }
@@ -536,8 +711,11 @@ module.exports = (io) => {
         ? existingPending.concat(promptTexts)
         : existingPending;
 
+      console.log(`[自動コミット] promptTexts数: ${promptTexts.length}, existingPending数: ${existingPending.length}, promptsForCommit数: ${promptsForCommit.length}`);
+
       if (promptsForCommit.length > 0) {
         const providerName = state.provider || providerConfig.displayName;
+        console.log(`[自動コミット] コミット処理開始 (provider: ${providerName})`);
 
         const runWithIndexLockRetry = async (operation) => {
           try {
@@ -547,7 +725,7 @@ module.exports = (io) => {
               try {
                 await gitManager.clearIndexLock();
               } catch (lockError) {
-                console.warn('Failed to clear git index.lock:', lockError.message);
+                // Lock cleanup failed - will retry operation anyway
               }
               return await operation();
             }
@@ -556,10 +734,14 @@ module.exports = (io) => {
         };
 
         if (await gitManager.isInitialized()) {
+          console.log(`[自動コミット] Git初期化済み、statusチェック開始`);
           try {
             const status = await gitManager.getStatus();
+            console.log(`[自動コミット] Git status取得完了: hasChanges=${status?.hasChanges}`);
+
             if (!status?.hasChanges) {
               pendingPromptsByProject[projectKey] = promptsForCommit;
+              console.log(`[自動コミット] 変更なし、プロンプトを保留`);
               socket.emit('commit_notification', {
                 status: 'info',
                 provider: providerName,
@@ -570,13 +752,20 @@ module.exports = (io) => {
               return;
             }
 
+            console.log(`[自動コミット] git add開始`);
             await runWithIndexLockRetry(() => gitManager.addFile('.'));
+            console.log(`[自動コミット] git add完了、コミットメッセージ作成`);
+
             const commitMessage = buildCommitMessage(promptsForCommit, providerName);
+            console.log(`[自動コミット] git commit開始`);
+
             const commitResult = await runWithIndexLockRetry(() => gitManager.commit(
               commitMessage,
               userInfo.name || 'WebIDE User',
               userInfo.email || 'webide@example.com'
             ));
+
+            console.log(`[自動コミット] git commit完了: success=${commitResult.success}`);
 
             if (commitResult.success) {
               commitPromptStore[commitResult.commitHash] = {
@@ -587,6 +776,7 @@ module.exports = (io) => {
               const durationLabel = typeof durationMs === 'number'
                 ? formatDuration(durationMs)
                 : '前回保留分';
+              console.log(`[自動コミット] ✅ コミット成功 (hash: ${commitResult.commitHash})`);
               socket.emit('commit_notification', {
                 status: 'success',
                 provider: providerName,
@@ -599,6 +789,7 @@ module.exports = (io) => {
                 timestamp: new Date().toISOString()
               });
             } else {
+              console.log(`[自動コミット] ⚠️ コミット失敗: ${commitResult.message}`);
               const noChanges = /no changes/i.test(commitResult.message || '');
               pendingPromptsByProject[projectKey] = promptsForCommit;
               socket.emit('commit_notification', {
@@ -612,9 +803,10 @@ module.exports = (io) => {
               });
             }
           } catch (gitError) {
+            console.log(`[自動コミット] ❌ Git操作エラー: ${gitError.message}`);
             if (/nothing to commit/i.test(gitError.message || '')) {
               pendingPromptsByProject[projectKey] = promptsForCommit;
-              console.warn('No changes detected for commit; deferring until next modifications.');
+              console.log(`[自動コミット] "nothing to commit"エラー、プロンプトを保留`);
               socket.emit('commit_notification', {
                 status: 'info',
                 provider: providerName,
@@ -624,7 +816,7 @@ module.exports = (io) => {
               });
             } else {
             pendingPromptsByProject[projectKey] = promptsForCommit;
-            console.warn('Auto-commit after AI session failed:', gitError.message);
+            console.log(`[自動コミット] コミット失敗、プロンプトを保留`);
             socket.emit('commit_notification', {
               status: 'error',
               provider: providerName,
@@ -635,6 +827,7 @@ module.exports = (io) => {
             }
           }
         } else {
+          console.log(`[自動コミット] Git未初期化、プロンプトを保留`);
           pendingPromptsByProject[projectKey] = promptsForCommit;
           socket.emit('commit_notification', {
             status: 'info',
@@ -644,6 +837,8 @@ module.exports = (io) => {
             message: 'トリップコードが未初期化のため、プロンプトを保留しました'
           });
         }
+      } else {
+        console.log(`[自動コミット] promptsForCommitが空のため、コミット処理をスキップ`);
       }
 
       delete sessionState[sessionKey];
@@ -659,7 +854,6 @@ module.exports = (io) => {
       try {
         await finalizeSession({ reason: 'exit' });
       } catch (finalizeError) {
-        console.error('Failed to finalize AI session:', finalizeError);
         socket.emit(
           'output',
           `\r\n⚠️ セッション後処理に失敗しました: ${finalizeError.message}\r\n`
@@ -699,13 +893,22 @@ module.exports = (io) => {
       // 画面バッファ全体で"esc to interrupt"/"esc to cancel"の有無をチェック
       const state = sessionState[socket.id];
       if (state) {
-        const bufferLower = terminalScreenBuffer.toLowerCase();
+        // ANSIエスケープシーケンスを除去してから検索
+        const cleanBuffer = terminalScreenBuffer.replace(/\x1b\[[0-9;]*m/g, '');
+        const bufferLower = cleanBuffer.toLowerCase();
+
         // Claude: "esc to interrupt", Codex: "esc to interrupt", Gemini: "esc to cancel"
         const screenHasEscToInterrupt = bufferLower.includes('esc to interrupt') || bufferLower.includes('esc to cancel');
+
+        // デバッグ: バッファの末尾200文字をログ出力（ANSIエスケープ除去後）
+        const bufferTail = cleanBuffer.slice(-200);
+        console.log(`[自動コミット/検知] バッファ末尾(200文字): "${bufferTail.replace(/\r?\n/g, '\\n')}"`);
+        console.log(`[自動コミット/検知] screenHasEscToInterrupt: ${screenHasEscToInterrupt}, awaitingApproval: ${state.awaitingApproval}, escToInterruptVisible: ${state.escToInterruptVisible}`);
 
         if (screenHasEscToInterrupt) {
           // 画面に"esc to interrupt"が表示されている = AI処理中
           if (!state.escToInterruptVisible) {
+            console.log(`[自動コミット] "esc to interrupt"表示検知 - AI処理開始`);
             state.escToInterruptVisible = true;
             state.escToInterruptStartTime = Date.now();
           }
@@ -716,6 +919,7 @@ module.exports = (io) => {
             state.responseCompleteTimer = null;
           }
         } else if (state.escToInterruptVisible && !state.awaitingApproval) {
+          console.log(`[自動コミット] "esc to interrupt"消失検知 - 2秒タイマー開始 (awaitingApproval: ${state.awaitingApproval})`);
           // 認証待ち中は"esc to"の消失を無視（認証画面で"esc to"が消えるため）
           // 以前は表示されていたが、今は画面から消えた可能性
           // ただし、長い応答でバッファから押し出された可能性もあるので、2秒待つ
@@ -727,15 +931,20 @@ module.exports = (io) => {
 
           // 2秒待って、まだ"esc to interrupt"がなければ完了とみなす
           state.responseCompleteTimer = setTimeout(() => {
+            console.log(`[自動コミット/タイマー] 2秒タイマー発火 (awaitingApproval: ${state.awaitingApproval})`);
+
             // 認証待ち状態になっている場合はスキップ
             if (state.awaitingApproval) {
+              console.log(`[自動コミット/タイマー] 認証待ち中のため自動コミットをスキップ`);
               state.responseCompleteTimer = null;
               return;
             }
 
             // 再度バッファをチェック
-            const finalBufferCheck = terminalScreenBuffer.toLowerCase();
+            const cleanFinalBuffer = terminalScreenBuffer.replace(/\x1b\[[0-9;]*m/g, '');
+            const finalBufferCheck = cleanFinalBuffer.toLowerCase();
             const stillHasEscToInterrupt = finalBufferCheck.includes('esc to interrupt') || finalBufferCheck.includes('esc to cancel');
+            console.log(`[自動コミット/タイマー] 最終バッファチェック: stillHasEscToInterrupt=${stillHasEscToInterrupt}`);
 
             if (!stillHasEscToInterrupt) {
               const displayDuration = state.escToInterruptStartTime
@@ -756,15 +965,106 @@ module.exports = (io) => {
 
               // Codexの場合、state.promptsは空でもhistory.jsonlにプロンプトが記録されている可能性があるため
               // responsePendingがtrueであれば自動コミットを実行
+              console.log(`[自動コミット] "esc to interrupt"消失検知、2秒待機完了 (adjustedDuration: ${adjustedDuration}ms)`);
               if (state.responsePending) {
+                console.log(`[自動コミット] responsePending=true、finalizeSessionを呼び出し`);
                 finalizeSession({ reason: 'response-complete' }).catch((err) => {
-                  console.error('Failed to finalize after AI response complete:', err);
+                  console.log(`[自動コミット] finalizeSession実行エラー: ${err.message}`);
                 });
+              } else {
+                console.log(`[自動コミット] responsePending=false、finalizeSessionをスキップ`);
               }
             } else {
               state.responseCompleteTimer = null;
             }
           }, 2000);
+        }
+      }
+
+      // Claude Code auth code detection
+      if (providerKey === 'claude') {
+        if (lowerText.includes('paste code here if prompted')) {
+          claudeAuthCodeInputPending = true;
+          claudeAuthCodeBuffer = rawText;
+          socket.emit('output', rawText);
+          return;
+        }
+
+        if (claudeAuthCodeInputPending) {
+          claudeAuthCodeBuffer += rawText;
+
+          // ANSIエスケープシーケンスを削除してから検索
+          const cleanBuffer = claudeAuthCodeBuffer.replace(/\x1b\[[0-9;]*m/g, '');
+          const bufferLower = cleanBuffer.toLowerCase();
+
+          // 認証完了を検知: "Login successful. Press Enter to continue…"
+          if (bufferLower.includes('login successful') && bufferLower.includes('press enter')) {
+            claudeAuthCodeInputPending = false;
+            claudeAuthCodeBuffer = '';
+            claudeLoginSuccessful = true;
+          }
+          socket.emit('output', rawText);
+          return;
+        }
+
+        // APIキー確認画面を検知（Login successful後のEnter入力後）
+        if (claudeLoginSuccessful && lowerText.includes('detected a custom api key')) {
+          claudeApiKeyConfirmPending = true;
+          claudeLoginSuccessful = false;
+
+          // 「1」を入力（選択完了）
+          setTimeout(() => {
+            ptyProcess.write('1');
+
+            // 「1」入力後、少し待ってからClaude Code CLIを再起動
+            setTimeout(() => {
+              // 現在のプロセスを終了
+              try {
+                ptyProcess.kill();
+              } catch (killError) {
+                // Process kill failed - will be handled by spawn
+              }
+
+              // 新しいプロセスを起動
+              setTimeout(() => {
+                try {
+                  const newPtyProcess = pty.spawn(providerConfig.command, [], {
+                    name: 'xterm-color',
+                    cols: 80,
+                    rows: 30,
+                    cwd: workspaceDir,
+                    env: {
+                      ...process.env,
+                      HOME: homeDir,
+                      PWD: workspaceDir,
+                      XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+                      AI_TERMINAL_PROVIDER: providerKey,
+                      ...providerEnv
+                    }
+                  });
+
+                  terminals[socket.id] = newPtyProcess;
+                  ptyProcess = newPtyProcess;
+
+                  // イベントハンドラを再設定
+                  newPtyProcess.on('spawn', () => {
+                    socket.emit('output', `\r\n✅ ${providerConfig.displayName} セッションを再起動しました\r\n`);
+                  });
+
+                  newPtyProcess.on('data', (data) => {
+                    socket.emit('output', data.toString());
+                  });
+
+                  newPtyProcess.on('exit', handleProcessExit);
+                  newPtyProcess.on('close', handleProcessExit);
+
+                  claudeApiKeyConfirmPending = false;
+                } catch (restartError) {
+                  socket.emit('output', '\r\n❌ Claude Code CLIの再起動に失敗しました\r\n');
+                }
+              }, 500);
+            }, 1000);
+          }, 300);
         }
       }
 
@@ -813,6 +1113,10 @@ module.exports = (io) => {
 
       // Approval detection (state must exist)
       if (state) {
+        // ANSIエスケープシーケンスを削除してからチェック
+        const cleanText = rawText.replace(/\x1b\[[0-9;]*m/g, '');
+        const cleanLower = cleanText.toLowerCase();
+
         const approvalPatterns = [
           'allow command?',
           'approval required',
@@ -826,17 +1130,19 @@ module.exports = (io) => {
           '3. no, and tell claude'
         ];
 
-        const normalizedChoicePrefix = rawText.replace(/^[^\x1b]*\x1b\[[0-9;]*m/g, '').trim();
-        if (
-          approvalPatterns.some(pattern => lowerText.includes(pattern)) ||
-          normalizedChoicePrefix.startsWith('│ ❯ 1. yes') ||
-          normalizedChoicePrefix.startsWith('│   1. yes')
-        ) {
+        const normalizedChoicePrefix = cleanText.replace(/^[^\x1b]*\x1b\[[0-9;]*m/g, '').trim();
+        const patternMatched = approvalPatterns.some(pattern => cleanLower.includes(pattern));
+        const choiceMatched = normalizedChoicePrefix.startsWith('│ ❯ 1. yes') || normalizedChoicePrefix.startsWith('│   1. yes');
+
+        if (patternMatched || choiceMatched) {
+          console.log(`[自動コミット/認証] 認証待ち検知 (patternMatched: ${patternMatched}, choiceMatched: ${choiceMatched})`);
+          console.log(`[自動コミット/認証] cleanText抜粋: "${cleanText.substring(0, 100).replace(/\r?\n/g, '\\n')}"`);
           beginApprovalWait(state);
           return;
         }
 
-        if (state.awaitingApproval && /press enter/.test(lowerText)) {
+        if (state.awaitingApproval && /press enter/.test(cleanLower)) {
+          console.log(`[自動コミット/認証] "press enter"検知、認証待ち終了`);
           endApprovalWait(state);
           state.responsePending = true;
           return;
@@ -928,6 +1234,16 @@ module.exports = (io) => {
             continue;
           }
 
+          // Claude認証コード入力中はプロンプトとして記録しない
+          if (providerKey === 'claude' && claudeAuthCodeInputPending) {
+            continue;
+          }
+
+          // Codex API key入力中はプロンプトとして記録しない
+          if (providerKey === 'codex' && codexApiKeyInputPending) {
+            continue;
+          }
+
           // 意味のある内容がない場合（空文字列や数字のみ）はプロンプトとして記録しない
           if (cleaned.length === 0 || /^[0-9\s]+$/.test(cleaned)) {
             continue;
@@ -947,6 +1263,7 @@ module.exports = (io) => {
             state.responseCompleteTimer = null;
           }
 
+          console.log(`[自動コミット] 新しいプロンプト検知: "${cleaned.substring(0, 50)}${cleaned.length > 50 ? '...' : ''}"`);
           state.prompts.push({
             id: randomUUID(),
             text: cleaned,
@@ -955,6 +1272,7 @@ module.exports = (io) => {
           state.responsePending = true;
           state.provider = providerConfig.displayName;
           state.lastPromptAt = nowTs;
+          console.log(`[自動コミット] responsePending=true設定、state.prompts数: ${state.prompts.length}`);
         }
       }
     });
@@ -968,7 +1286,6 @@ module.exports = (io) => {
       try {
         terminalInstance.resize(size.cols, size.rows);
       } catch (resizeError) {
-        console.warn('Failed to resize PTY session:', resizeError.message);
         socket.emit('output', '\r\n⚠️ ターミナルのサイズ変更に失敗しました。セッションを再接続してください。\r\n');
       }
     });
@@ -980,17 +1297,19 @@ module.exports = (io) => {
       try {
         ptyProcess.kill();
       } catch (terminateError) {
-        console.warn('Failed to terminate PTY on explicit request:', terminateError.message);
+        // Process termination failed - already dead or zombie
       }
     });
 
     // Handle disconnect
     socket.on('disconnect', () => {
+      stopBufferPolling(); // ポーリング停止
+
       if (terminals[socket.id]) {
         try {
           terminals[socket.id].kill();
         } catch (killError) {
-          console.warn('Failed to terminate PTY on disconnect:', killError.message);
+          // Process termination failed - already dead or zombie
         }
         delete terminals[socket.id];
       }
