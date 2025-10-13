@@ -13,7 +13,6 @@ const terminals = {};
 const inputBuffers = {};
 const sessionState = {};
 const pendingPromptsByProject = {};
-const idleTimers = {};
 const commitPromptStore = {};
 
 function ensureSessionState(sessionKey, defaultProvider) {
@@ -22,11 +21,14 @@ function ensureSessionState(sessionKey, defaultProvider) {
       startTime: Date.now(),
       prompts: [],
       provider: defaultProvider,
-      completionTimer: null,
       awaitingApproval: false,
       lastPromptStartedAt: null,
       responsePending: false,
-      finalizedPromptIds: new Set()
+      finalizedPromptIds: new Set(),
+      escToInterruptVisible: false,
+      escToInterruptStartTime: null,
+      responseCompleteTimer: null,
+      actualDurationMs: null
     };
   }
   return sessionState[sessionKey];
@@ -332,6 +334,8 @@ module.exports = (io) => {
 
     let ptyProcess;
     let autoApprovalHandled = false;
+    let codexApiKeyInputPending = false;
+    let codexOutputBuffer = '';
     try {
       // Spawn the selected AI CLI directly so no other commands can execute
       ptyProcess = pty.spawn(providerConfig.command, [], {
@@ -368,6 +372,11 @@ module.exports = (io) => {
     socket.join(projectRoom);
     const gitManager = new GitManager(workspaceDir);
 
+    // ターミナル画面バッファを保持（最新の部分のみ）
+    // "esc to interrupt"は画面の最新部分に表示されるので、古い部分は不要
+    let terminalScreenBuffer = '';
+    const MAX_BUFFER_SIZE = 2000; // 最新の2000文字のみ保持（"esc to"を含む領域）
+
     // Handle PTY spawn event
     ptyProcess.on('spawn', () => {
       socket.emit('output', `\r\n✅ ${providerConfig.displayName} セッションを開始しました\r\n`);
@@ -376,36 +385,6 @@ module.exports = (io) => {
 
     const projectKey = getProjectKey(userId, projectId);
 
-    const queueCommitAfterIdle = () => {
-      const state = sessionState[socket.id];
-      if (!state || state.prompts.length === 0) {
-        return;
-      }
-
-      if (!state.responsePending) {
-        return;
-      }
-
-      if (state.awaitingApproval) {
-        return;
-      }
-
-      if (idleTimers[socket.id]) {
-        clearTimeout(idleTimers[socket.id]);
-      }
-
-      if (state.completionTimer) {
-        clearTimeout(state.completionTimer);
-        state.completionTimer = null;
-      }
-
-      idleTimers[socket.id] = setTimeout(() => {
-        finalizeSession({ reason: state.awaitingApproval ? 'approval-idle' : 'idle' }).catch((idleError) => {
-          console.error('Failed to finalize AI session on idle:', idleError);
-        });
-      }, 2000);
-    };
-
     async function finalizeSession({ reason }) {
       const sessionKey = socket.id;
       const state = sessionState[sessionKey];
@@ -413,41 +392,99 @@ module.exports = (io) => {
         return;
       }
 
-      if (state.completionTimer) {
-        clearTimeout(state.completionTimer);
-        state.completionTimer = null;
-      }
-
-      if (idleTimers[sessionKey]) {
-        clearTimeout(idleTimers[sessionKey]);
-        delete idleTimers[sessionKey];
-      }
-
-      if (state.awaitingApproval && !['exit', 'prompt-ready', 'approval-idle'].includes(reason)) {
+      if (state.awaitingApproval && !['exit', 'response-complete'].includes(reason)) {
         return;
       }
 
+      // タイマーをクリア
+      if (state.responseCompleteTimer) {
+        clearTimeout(state.responseCompleteTimer);
+        state.responseCompleteTimer = null;
+      }
+
       state.responsePending = false;
+      state.escToInterruptVisible = false;
+      state.escToInterruptStartTime = null;
 
-      const promptsFromSession = state.prompts || [];
-      const promptTexts = promptsFromSession.map(entry => entry.text);
-      const lastPrompt = promptsFromSession[promptsFromSession.length - 1];
-      const durationMs = lastPrompt ? Math.max(0, Date.now() - (lastPrompt.startedAt || state.startTime)) : null;
+      // Codexの場合、history.jsonlから実際のプロンプトを抽出
+      let promptTexts = [];
+      if (providerKey === 'codex') {
+        try {
+          const historyPath = path.join(homeDir, '.codex', 'history.jsonl');
+          const historyContent = await fs.readFile(historyPath, 'utf8');
+          const lines = historyContent.trim().split('\n');
 
-      if (promptsFromSession.length > 0) {
-        for (const entry of promptsFromSession) {
-          if (state.finalizedPromptIds.has(entry.id)) {
-            continue;
+          // state.promptsに記録されている最初のプロンプトのタイムスタンプを基準にする
+          // もしstate.promptsが空なら、セッション開始時刻の少し前（30秒）から取得
+          let filterStartTime;
+          if (state.prompts.length > 0 && state.prompts[0].startedAt) {
+            // 最初のプロンプトの1秒前から取得（タイミングのズレを吸収）
+            filterStartTime = (state.prompts[0].startedAt - 1000) / 1000;
+          } else {
+            // セッション開始の30秒前から取得（広めに取る）
+            filterStartTime = (state.startTime - 30000) / 1000;
           }
-          try {
-            const promptDuration = Math.max(0, Date.now() - (entry.startedAt || state.startTime));
-            await db.execute(
-              'INSERT INTO claude_prompt_logs (project_id, user_id, prompt, duration_ms) VALUES (?, ?, ?, ?)',
-              [projectId, userId, entry.text, promptDuration]
-            );
-            state.finalizedPromptIds.add(entry.id);
-          } catch (logError) {
-            console.warn('Failed to record prompt log:', logError.message);
+
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line);
+              if (entry.ts >= filterStartTime && entry.text) {
+                promptTexts.push(entry.text);
+              }
+            } catch (parseError) {
+              console.warn('Failed to parse history line:', parseError.message);
+            }
+          }
+        } catch (readError) {
+          console.warn('Failed to read Codex history, falling back to session prompts:', readError.message);
+          const promptsFromSession = state.prompts || [];
+          promptTexts = promptsFromSession.map(entry => entry.text);
+        }
+      } else {
+        // Claude / Gemini の場合は従来通り
+        const promptsFromSession = state.prompts || [];
+        promptTexts = promptsFromSession.map(entry => entry.text);
+      }
+
+      // actualDurationMsが設定されていればそれを使用（2秒の待機時間を引いた正確な時間）
+      // 設定されていなければ従来通りの計算
+      const durationMs = state.actualDurationMs !== null && state.actualDurationMs !== undefined
+        ? state.actualDurationMs
+        : (state.prompts?.[state.prompts.length - 1]
+          ? Math.max(0, Date.now() - (state.prompts[state.prompts.length - 1].startedAt || state.startTime))
+          : null);
+
+      // プロンプトログをデータベースに保存
+      if (promptTexts.length > 0) {
+        // Codexの場合、history.jsonlから取得したプロンプトを保存
+        if (providerKey === 'codex') {
+          for (const promptText of promptTexts) {
+            try {
+              await db.execute(
+                'INSERT INTO claude_prompt_logs (project_id, user_id, prompt, duration_ms) VALUES (?, ?, ?, ?)',
+                [projectId, userId, promptText, durationMs]
+              );
+            } catch (logError) {
+              console.warn('Failed to record Codex prompt log:', logError.message);
+            }
+          }
+        } else {
+          // Claude / Gemini の場合は従来通り
+          const promptsFromSession = state.prompts || [];
+          for (const entry of promptsFromSession) {
+            if (state.finalizedPromptIds.has(entry.id)) {
+              continue;
+            }
+            try {
+              const promptDuration = Math.max(0, Date.now() - (entry.startedAt || state.startTime));
+              await db.execute(
+                'INSERT INTO claude_prompt_logs (project_id, user_id, prompt, duration_ms) VALUES (?, ?, ?, ?)',
+                [projectId, userId, entry.text, promptDuration]
+              );
+              state.finalizedPromptIds.add(entry.id);
+            } catch (logError) {
+              console.warn('Failed to record prompt log:', logError.message);
+            }
           }
         }
       }
@@ -614,62 +651,146 @@ module.exports = (io) => {
     // Handle PTY data output
     ptyProcess.on('data', (data) => {
       const rawText = data.toString();
-      socket.emit('output', rawText);
-      const state = sessionState[socket.id];
-      if (!state) {
-        return;
-      }
-
       const lowerText = rawText.toLowerCase();
-      const approvalPatterns = [
-        'allow command?',
-        'approval required',
-        'always approve this session',
-        'always yes',
-        'use arrow keys',
-        'select an option',
-        'apply this change?',
-        '1. yes',
-        '2. yes, allow all edits',
-        '3. no, and tell claude'
-      ];
 
-      const normalizedChoicePrefix = rawText.replace(/^[^\x1b]*\x1b\[[0-9;]*m/g, '').trim();
-      if (
-        approvalPatterns.some(pattern => lowerText.includes(pattern)) ||
-        normalizedChoicePrefix.startsWith('│ ❯ 1. yes') ||
-        normalizedChoicePrefix.startsWith('│   1. yes')
-      ) {
-        state.awaitingApproval = true;
-        if (idleTimers[socket.id]) {
-          clearTimeout(idleTimers[socket.id]);
-          delete idleTimers[socket.id];
+      // ターミナル画面バッファを更新
+      terminalScreenBuffer += rawText;
+      if (terminalScreenBuffer.length > MAX_BUFFER_SIZE) {
+        terminalScreenBuffer = terminalScreenBuffer.slice(-MAX_BUFFER_SIZE);
+      }
+
+      // 画面バッファ全体で"esc to interrupt"の有無をチェック
+      const state = sessionState[socket.id];
+      if (state) {
+        const bufferLower = terminalScreenBuffer.toLowerCase();
+        const screenHasEscToInterrupt = bufferLower.includes('esc to interrupt') || bufferLower.includes('esc to cancel');
+
+        if (screenHasEscToInterrupt) {
+          // 画面に"esc to interrupt"が表示されている = AI処理中
+          if (!state.escToInterruptVisible) {
+            state.escToInterruptVisible = true;
+            state.escToInterruptStartTime = Date.now();
+          }
+
+          // タイマーをクリア（まだAI応答中）
+          if (state.responseCompleteTimer) {
+            clearTimeout(state.responseCompleteTimer);
+            state.responseCompleteTimer = null;
+          }
+        } else if (state.escToInterruptVisible) {
+          // 以前は表示されていたが、今は画面から消えた可能性
+          // ただし、長い応答でバッファから押し出された可能性もあるので、2秒待つ
+
+          // 既存のタイマーをクリア
+          if (state.responseCompleteTimer) {
+            clearTimeout(state.responseCompleteTimer);
+          }
+
+          // 2秒待って、まだ"esc to interrupt"がなければ完了とみなす
+          state.responseCompleteTimer = setTimeout(() => {
+            // 再度バッファをチェック
+            const finalBufferCheck = terminalScreenBuffer.toLowerCase();
+            const stillHasEscToInterrupt = finalBufferCheck.includes('esc to interrupt') || finalBufferCheck.includes('esc to cancel');
+
+            if (!stillHasEscToInterrupt) {
+              const displayDuration = state.escToInterruptStartTime
+                ? Math.max(0, Date.now() - state.escToInterruptStartTime - 2000) // 2秒の待機時間を引く
+                : 0;
+
+              state.escToInterruptVisible = false;
+              state.escToInterruptStartTime = null;
+              state.responseCompleteTimer = null;
+
+              // 実際の処理時間をstateに保存（finalizeSessionで使用）
+              state.actualDurationMs = displayDuration;
+
+              // Codexの場合、state.promptsは空でもhistory.jsonlにプロンプトが記録されている可能性があるため
+              // responsePendingがtrueであれば自動コミットを実行
+              if (state.responsePending) {
+                finalizeSession({ reason: 'response-complete' }).catch((err) => {
+                  console.error('Failed to finalize after AI response complete:', err);
+                });
+              }
+            } else {
+              state.responseCompleteTimer = null;
+            }
+          }, 2000);
         }
-        if (state.completionTimer) {
-          clearTimeout(state.completionTimer);
-          state.completionTimer = null;
+      }
+
+      // Codex API key input detection and auto-fill
+      if (providerKey === 'codex') {
+        if (lowerText.includes('use your own openai api key for usage-based billing')) {
+          codexApiKeyInputPending = true;
+          codexOutputBuffer = rawText;
+
+          if (!autoApprovalHandled) {
+            setTimeout(() => {
+              ptyProcess.write('\r');
+            }, 200);
+            autoApprovalHandled = true;
+          }
+
+          return;
         }
-        return;
+
+        if (codexApiKeyInputPending) {
+          codexOutputBuffer += rawText;
+
+          if (lowerText.includes('api key configured') ||
+              lowerText.includes('what can i help')) {
+
+            let cleanedOutput = codexOutputBuffer;
+            cleanedOutput = cleanedOutput.replace(/╭[^\╯]*╯/gs, '');
+            cleanedOutput = cleanedOutput.replace(/Paste or type your API key[^\n]*\n?/gi, '');
+            cleanedOutput = cleanedOutput.replace(/It will be stored locally[^\n]*\n?/gi, '');
+            cleanedOutput = cleanedOutput.replace(/sk-[A-Za-z0-9_\-]{20,}/g, '');
+            cleanedOutput = cleanedOutput.replace(/[╭╮╰╯│─]+/g, '');
+            cleanedOutput = cleanedOutput.replace(/\n{3,}/g, '\n\n');
+
+            codexApiKeyInputPending = false;
+            codexOutputBuffer = '';
+
+            socket.emit('output', cleanedOutput);
+            return;
+          }
+
+          return;
+        }
       }
 
-      if (state.awaitingApproval && /press enter/.test(lowerText)) {
-        state.awaitingApproval = false;
-        state.responsePending = true;
-        return;
-      }
+      socket.emit('output', rawText);
 
-      const trimmedLines = rawText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-      const promptReady = trimmedLines.some(line => /^you:\s*$/i.test(line));
+      // Approval detection (state must exist)
+      if (state) {
+        const approvalPatterns = [
+          'allow command?',
+          'approval required',
+          'always approve this session',
+          'always yes',
+          'use arrow keys',
+          'select an option',
+          'apply this change?',
+          '1. yes',
+          '2. yes, allow all edits',
+          '3. no, and tell claude'
+        ];
 
-      if (promptReady && state.responsePending && !state.awaitingApproval) {
-        finalizeSession({ reason: 'prompt-ready' }).catch((err) => {
-          console.error('Failed to finalize after prompt-ready:', err);
-        });
-        return;
-      }
+        const normalizedChoicePrefix = rawText.replace(/^[^\x1b]*\x1b\[[0-9;]*m/g, '').trim();
+        if (
+          approvalPatterns.some(pattern => lowerText.includes(pattern)) ||
+          normalizedChoicePrefix.startsWith('│ ❯ 1. yes') ||
+          normalizedChoicePrefix.startsWith('│   1. yes')
+        ) {
+          state.awaitingApproval = true;
+          return;
+        }
 
-      if (state.prompts.length > 0 && state.responsePending && !state.awaitingApproval) {
-        queueCommitAfterIdle();
+        if (state.awaitingApproval && /press enter/.test(lowerText)) {
+          state.awaitingApproval = false;
+          state.responsePending = true;
+          return;
+        }
       }
     });
 
@@ -757,6 +878,25 @@ module.exports = (io) => {
             continue;
           }
 
+          // 意味のある内容がない場合（空文字列や数字のみ）はプロンプトとして記録しない
+          if (cleaned.length === 0 || /^[0-9\s]+$/.test(cleaned)) {
+            continue;
+          }
+
+          // 新しいプロンプト送信時は、escToInterruptVisibleをリセット
+          // これにより、次に「esc to interrupt」が表示されるまで自動コミットは発火しない
+          state.escToInterruptVisible = false;
+          state.escToInterruptStartTime = null;
+
+          // 画面バッファもクリア（新しいプロンプトなので過去の画面状態は不要）
+          terminalScreenBuffer = '';
+
+          // タイマーもクリア
+          if (state.responseCompleteTimer) {
+            clearTimeout(state.responseCompleteTimer);
+            state.responseCompleteTimer = null;
+          }
+
           state.prompts.push({
             id: randomUUID(),
             text: cleaned,
@@ -765,7 +905,6 @@ module.exports = (io) => {
           state.responsePending = true;
           state.provider = providerConfig.displayName;
           state.lastPromptAt = nowTs;
-          queueCommitAfterIdle();
         }
       }
     });

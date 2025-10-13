@@ -729,11 +729,6 @@ const IDEPage = () => {
       console.log(`[IDE] Fetching file tree${shouldSync ? ' with sync' : ''}`);
       const response = await axios.get(`/api/filesystem/${projectId}/tree${syncParam}`);
       setFileTree(response.data);
-
-      const defaultFile = response.data['index.html'];
-      if (defaultFile) {
-        setSelectedFile(prev => prev || defaultFile);
-      }
     } catch (error) {
       console.error('Error fetching file tree:', error);
     } finally {
