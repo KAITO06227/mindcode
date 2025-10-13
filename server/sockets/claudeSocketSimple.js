@@ -642,11 +642,67 @@ module.exports = (io) => {
           const promptsFromSession = state.prompts || [];
           promptTexts = promptsFromSession.map(entry => entry.text);
         }
-      } else {
-        // Gemini の場合は従来通り
-        console.log(`[自動コミット] Gemini: state.promptsから取得`);
-        const promptsFromSession = state.prompts || [];
-        promptTexts = promptsFromSession.map(entry => entry.text);
+      } else if (providerKey === 'gemini') {
+        // Gemini: ~/.gemini/tmp/ハッシュ値/logs.json から抽出
+        try {
+          const geminiTmpDir = path.join(homeDir, '.gemini', 'tmp');
+          const tmpDirs = await fs.readdir(geminiTmpDir);
+          console.log(`[自動コミット] Gemini tmp ディレクトリ一覧: ${tmpDirs.length}個`);
+
+          // 最新のハッシュディレクトリを探す（修正時刻順）
+          let latestLogPath = null;
+          let latestMtime = 0;
+
+          for (const hashDir of tmpDirs) {
+            const logsPath = path.join(geminiTmpDir, hashDir, 'logs.json');
+            try {
+              const stats = await fs.stat(logsPath);
+              if (stats.mtimeMs > latestMtime) {
+                latestMtime = stats.mtimeMs;
+                latestLogPath = logsPath;
+              }
+            } catch (statError) {
+              // logs.json が存在しないディレクトリはスキップ
+              continue;
+            }
+          }
+
+          if (latestLogPath) {
+            const logsContent = await fs.readFile(latestLogPath, 'utf8');
+            const logs = JSON.parse(logsContent);
+            console.log(`[自動コミット] Gemini logs.json読み込み成功: ${logs.length}エントリ`);
+
+            // state.promptsに記録されている最初のプロンプトのタイムスタンプを基準にする
+            // もしstate.promptsが空なら、セッション開始時刻の少し前（30秒）から取得
+            let filterStartTimeMs;
+            if (state.prompts.length > 0 && state.prompts[0].startedAt) {
+              filterStartTimeMs = state.prompts[0].startedAt - 1000;
+              console.log(`[自動コミット/Gemini] フィルタ開始時刻: ${filterStartTimeMs}ms (state.prompts[0].startedAtベース)`);
+            } else {
+              filterStartTimeMs = state.startTime - 30000;
+              console.log(`[自動コミット/Gemini] フィルタ開始時刻: ${filterStartTimeMs}ms (state.startTimeベース、30秒前)`);
+            }
+
+            for (const entry of logs) {
+              // Gemini logs.jsonのフォーマット:
+              // {sessionId, messageId, type: "user"|"assistant", message, timestamp: ISO8601}
+              if (entry.type === 'user' && entry.message) {
+                const entryTimestamp = new Date(entry.timestamp).getTime();
+                console.log(`[自動コミット/Gemini] エントリ: type=${entry.type}, timestamp=${entryTimestamp}, message="${entry.message.substring(0, 50)}..."`);
+
+                if (entryTimestamp >= filterStartTimeMs) {
+                  promptTexts.push(entry.message);
+                  console.log(`[自動コミット/Gemini] ✅ プロンプト追加: "${entry.message.substring(0, 50)}..."`);
+                }
+              }
+            }
+            console.log(`[自動コミット] Gemini logs.jsonから抽出したプロンプト数: ${promptTexts.length}`);
+          } else {
+            console.log(`[自動コミット] Gemini logs.jsonが見つかりません`);
+          }
+        } catch (readError) {
+          console.log(`[自動コミット] Gemini logs.json読み込み失敗: ${readError.message}`);
+        }
       }
 
       // actualDurationMsが設定されていればそれを使用（2秒の待機時間を引いた正確な時間）
@@ -667,36 +723,16 @@ module.exports = (io) => {
       state.approvalWaitStartTime = null;
 
       // プロンプトログをデータベースに保存
+      // すべてのプロバイダ（Claude / Codex / Gemini）で履歴ファイルから取得したプロンプトを保存
       if (promptTexts.length > 0) {
-        // Claude / Codexの場合、history.jsonlから取得したプロンプトを保存
-        if (providerKey === 'codex' || providerKey === 'claude') {
-          for (const promptText of promptTexts) {
-            try {
-              await db.execute(
-                'INSERT INTO claude_prompt_logs (project_id, user_id, prompt, duration_ms) VALUES (?, ?, ?, ?)',
-                [projectId, userId, promptText, durationMs]
-              );
-            } catch (logError) {
-              // Silent failure - prompt log is not critical
-            }
-          }
-        } else {
-          // Gemini の場合は従来通り
-          const promptsFromSession = state.prompts || [];
-          for (const entry of promptsFromSession) {
-            if (state.finalizedPromptIds.has(entry.id)) {
-              continue;
-            }
-            try {
-              const promptDuration = Math.max(0, Date.now() - (entry.startedAt || state.startTime));
-              await db.execute(
-                'INSERT INTO claude_prompt_logs (project_id, user_id, prompt, duration_ms) VALUES (?, ?, ?, ?)',
-                [projectId, userId, entry.text, promptDuration]
-              );
-              state.finalizedPromptIds.add(entry.id);
-            } catch (logError) {
-              // Silent failure - prompt log is not critical
-            }
+        for (const promptText of promptTexts) {
+          try {
+            await db.execute(
+              'INSERT INTO claude_prompt_logs (project_id, user_id, prompt, duration_ms) VALUES (?, ?, ?, ?)',
+              [projectId, userId, promptText, durationMs]
+            );
+          } catch (logError) {
+            // Silent failure - prompt log is not critical
           }
         }
       }
