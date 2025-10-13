@@ -318,13 +318,16 @@ router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
       [fileId]
     );
 
-    // If specific version requested, get content from Git
+    // Get content: either from specific version (Git) or from physical file (current)
     let content = file.content;
+    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const physicalFilePath = path.join(projectPath, file.file_path);
+
     if (version && versions.length > 0) {
+      // Specific version requested - get from Git
       const versionRecord = versions.find(v => v.version_number == version);
       if (versionRecord && versionRecord.git_commit_hash) {
         try {
-          const projectPath = await resolveExistingProjectPath(req.user, projectId);
           const gitManager = new GitManager(projectPath);
           const historicalContent = await gitManager.getFileAtCommit(file.file_path, versionRecord.git_commit_hash);
           if (historicalContent !== null) {
@@ -333,6 +336,16 @@ router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
         } catch (error) {
           console.warn('Failed to get historical content:', error.message);
         }
+      }
+    } else if (file.file_type !== 'folder') {
+      // No specific version - get latest content from physical file
+      try {
+        content = await fs.readFile(physicalFilePath, 'utf8');
+        console.log(`[FILE READ] Reading latest content from physical file: ${file.file_path}`);
+      } catch (readError) {
+        console.warn(`[FILE READ] Failed to read physical file, using DB content: ${readError.message}`);
+        // Fallback to database content if physical file doesn't exist
+        content = file.content;
       }
     }
 
