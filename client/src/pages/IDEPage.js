@@ -726,7 +726,6 @@ const IDEPage = () => {
       const shouldSync = forceSync || !fileTree || Object.keys(fileTree).length === 0;
       const syncParam = shouldSync ? '?sync=true' : '';
 
-      console.log(`[IDE] Fetching file tree${shouldSync ? ' with sync' : ''}`);
       const response = await axios.get(`/api/filesystem/${projectId}/tree${syncParam}`);
       setFileTree(response.data);
     } catch (error) {
@@ -742,7 +741,6 @@ const IDEPage = () => {
 
   // Git復元後のファイルツリー更新（強制同期）
   const handleGitRefresh = useCallback(() => {
-    console.log('[IDE] Git refresh requested - forcing sync');
     fetchFileTree(true);
   }, [fetchFileTree]);
 
@@ -764,7 +762,6 @@ const IDEPage = () => {
           return;
         }
       } catch (error) {
-        console.warn('レイアウトの取得に失敗しました。デフォルトを使用します:', error.message);
       }
 
       applyLayoutConfig({ layout: defaultLayoutMap, visibility: defaultVisibility });
@@ -958,7 +955,6 @@ const IDEPage = () => {
     try {
       const response = await axios.get(`/api/filesystem/${projectId}/files/${selectedFile.id}`);
       if (response.data) {
-        console.log('[IDE] Refreshing current file content after Git restore');
         setSelectedFile(prev => ({
           ...prev,
           content: response.data.content
@@ -1145,7 +1141,7 @@ const IDEPage = () => {
                     </PanelHeader>
                     <PanelContent>
                       {key === 'fileTree' && (
-                        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
                           <FileTree
                             fileTree={fileTree}
                             selectedFile={selectedFile}

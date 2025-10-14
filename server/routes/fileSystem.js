@@ -325,8 +325,7 @@ router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
             content = historicalContent;
           }
         } catch (error) {
-          console.warn('Failed to get historical content:', error.message);
-        }
+          }
       }
     }
 
@@ -399,7 +398,6 @@ router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
         await fs.unlink(fullFilePath);
       }
     } catch (error) {
-      console.warn('Failed to delete file/folder from filesystem:', error.message);
       // Continue with database deletion even if file doesn't exist
     }
 
@@ -600,9 +598,7 @@ router.get('/:projectId/tree', verifyToken, async (req, res) => {
         const projectPath = await resolveExistingProjectPath(req.user, projectId);
         const gitManager = new GitManager(projectPath);
 
-        console.log(`[SYNC] Manual sync requested for project ${projectId}`);
         const syncResult = await gitManager.syncPhysicalFilesWithDatabase(projectId, req.user.id, db);
-        console.log(`[SYNC] Manual sync completed: ${syncResult.fileCount} files, ${syncResult.folderCount} folders`);
       } catch (syncError) {
         console.error('Manual sync failed:', syncError);
         // 同期失敗してもファイルツリー取得は続行
@@ -699,7 +695,8 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
   try {
     const { projectId } = req.params;
     const targetPath = req.body.targetPath || '';
-    
+    const relativePaths = req.body.relativePaths || [];
+
     // Verify project ownership
     const [projects] = await db.execute(
       'SELECT * FROM projects WHERE id = ? AND user_id = ?',
@@ -711,25 +708,92 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
     }
 
     const uploadedFiles = [];
+    const createdFolders = new Set();
     const projectPath = await resolveExistingProjectPath(req.user, projectId);
 
-    for (const file of req.files) {
+    for (let i = 0; i < req.files.length; i++) {
+      const file = req.files[i];
+      const relativePath = Array.isArray(relativePaths) ? relativePaths[i] : relativePaths;
+
       try {
         const content = await fs.readFile(file.path, 'utf-8').catch(() => '');
-        const fullFilePath = targetPath ? `${targetPath}/${file.filename}` : file.filename;
-        
+
+        // フォルダ構造を考慮したファイルパス
+        let fullFilePath;
+        if (relativePath && relativePath !== '') {
+          // webkitRelativePathがある場合（フォルダアップロード）
+          fullFilePath = targetPath ? `${targetPath}/${relativePath}` : relativePath;
+        } else {
+          // 通常のファイルアップロード
+          fullFilePath = targetPath ? `${targetPath}/${file.filename}` : file.filename;
+        }
+
+        // フォルダ構造を作成
+        const fileDirPath = path.dirname(fullFilePath);
+        if (fileDirPath && fileDirPath !== '.' && !createdFolders.has(fileDirPath)) {
+          const dirParts = fileDirPath.split('/');
+          let currentPath = '';
+
+          for (const part of dirParts) {
+            const parentPath = currentPath;
+            currentPath = currentPath ? `${currentPath}/${part}` : part;
+
+            if (!createdFolders.has(currentPath)) {
+              // フォルダがDBに存在するか確認
+              const [existingFolders] = await db.execute(
+                'SELECT id FROM project_files WHERE project_id = ? AND file_path = ? AND file_type = ?',
+                [projectId, currentPath, 'folder']
+              );
+
+              if (existingFolders.length === 0) {
+                // フォルダを作成
+                const folderFullPath = path.join(projectPath, currentPath);
+                await fs.mkdir(folderFullPath, { recursive: true });
+
+                const [folderResult] = await db.execute(`
+                  INSERT INTO project_files
+                  (project_id, file_path, file_name, content, file_type, file_size,
+                   permissions, checksum, is_binary, created_by, updated_by)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  [projectId, currentPath, part, '', 'folder', 0,
+                   'rwxr-xr-x', '', false, req.user.id, req.user.id]
+                );
+
+                const folderId = folderResult.insertId;
+
+                await db.execute(`
+                  INSERT INTO file_versions
+                  (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
+                  VALUES (?, 1, 0, '', 'create', 'Folder created during upload', ?)`,
+                  [folderId, req.user.id]
+                );
+
+                createdFolders.add(currentPath);
+              } else {
+                createdFolders.add(currentPath);
+              }
+            }
+          }
+        }
+
+        // ファイルを物理的に正しい場所に移動
+        const finalFilePath = path.join(projectPath, fullFilePath);
+        await fs.mkdir(path.dirname(finalFilePath), { recursive: true });
+        await fs.rename(file.path, finalFilePath);
+
         // Calculate metadata
         const checksum = calculateChecksum(content);
         const fileType = getFileType(file.filename);
         const isBinary = isBinaryFile(content);
-        
+        const fileName = path.basename(fullFilePath);
+
         // Save to database
         const [result] = await db.execute(`
-          INSERT INTO project_files 
-          (project_id, file_path, file_name, content, file_type, file_size, 
-           checksum, is_binary, created_by, updated_by) 
+          INSERT INTO project_files
+          (project_id, file_path, file_name, content, file_type, file_size,
+           checksum, is_binary, created_by, updated_by)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [projectId, fullFilePath, file.filename, content, fileType, file.size, 
+          [projectId, fullFilePath, fileName, content, fileType, file.size,
            checksum, isBinary, req.user.id, req.user.id]
         );
 
@@ -737,7 +801,7 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
 
         // Create version record
         await db.execute(`
-          INSERT INTO file_versions 
+          INSERT INTO file_versions
           (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
           VALUES (?, 1, ?, ?, 'create', 'File uploaded via API', ?)`,
           [fileId, file.size, checksum, req.user.id]
@@ -748,7 +812,7 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
 
         uploadedFiles.push({
           id: fileId,
-          filename: file.filename,
+          filename: fileName,
           size: file.size,
           path: fullFilePath,
           checksum
@@ -763,19 +827,21 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
     if (req.user?.id) {
       emitFileTreeUpdate(req.user.id, projectId, {
         action: 'upload',
-        uploadedCount: uploadedFiles.length
+        uploadedCount: uploadedFiles.length,
+        createdFolders: createdFolders.size
       });
     }
 
-    res.json({ 
-      files: uploadedFiles
+    res.json({
+      files: uploadedFiles,
+      createdFolders: createdFolders.size
     });
 
   } catch (error) {
     console.error('Error uploading files:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error uploading files',
-      error: error.message 
+      error: error.message
     });
   }
 });

@@ -164,7 +164,6 @@ const CodeEditor = forwardRef(({ file, onChange, onSave }, ref) => {
   useEffect(() => {
     const handleGitUpdate = () => {
       if (file?.id) {
-        console.log('[CodeEditor] Git update detected, refreshing current file content');
         // エディタの内容を最新のファイル内容で更新
         // file objectが更新されると自動的にエディタも更新される
         window.dispatchEvent(new CustomEvent('mindcode:refreshCurrentFile'));

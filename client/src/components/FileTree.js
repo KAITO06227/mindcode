@@ -12,6 +12,7 @@ import {
   FiFolderPlus,
   FiRefreshCcw
 } from 'react-icons/fi';
+import UploadModal from './UploadModal';
 
 const TreeContainer = styled.div`
   flex: 1;
@@ -106,7 +107,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
   const [editingItem, setEditingItem] = useState(null);
   const [newItemName, setNewItemName] = useState('');
   const [selectedItem, setSelectedItem] = useState(null);
-  const fileInputRef = useRef(null);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const socketRef = useRef(null);
   const [draggedItem, setDraggedItem] = useState(null);
   const [dragOverPath, setDragOverPath] = useState(null);
@@ -126,14 +127,12 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
 
     // Gitイベントとファイルイベントのリスナーを追加
     const handleGitUpdate = () => {
-      console.log('[FileTree] Git update event received, refreshing...');
       if (onTreeUpdate) {
         onTreeUpdate();
       }
     };
 
     const handleFilesUpdate = () => {
-      console.log('[FileTree] Files update event received, refreshing...');
       if (onTreeUpdate) {
         onTreeUpdate();
       }
@@ -339,20 +338,30 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
     }
   };
 
-  const handleFileUpload = (event) => {
-    const files = Array.from(event.target.files);
-    uploadFiles(files);
+  const handleUploadModalOpen = () => {
+    setIsUploadModalOpen(true);
   };
 
-  const uploadFiles = async (files) => {
+  const handleUploadModalClose = () => {
+    setIsUploadModalOpen(false);
+  };
+
+  const handleUpload = async (files) => {
     try {
       const targetPath = getTargetPath();
-      
+
       const formData = new FormData();
       files.forEach(file => {
         formData.append('files', file);
+        // webkitRelativePathがある場合（フォルダアップロード）、それも送信
+        if (file.webkitRelativePath) {
+          formData.append('relativePaths', file.webkitRelativePath);
+        } else {
+          // 通常のファイルアップロードの場合は空文字列
+          formData.append('relativePaths', '');
+        }
       });
-      
+
       // Add target path to form data
       formData.append('targetPath', targetPath);
 
@@ -363,14 +372,14 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       });
 
       onTreeUpdate();
-      
+
       // Expand the target folder if it's a folder
       if (selectedItem?.type === 'folder') {
         setExpandedFolders(prev => new Set([...prev, selectedItem.path]));
       }
     } catch (error) {
       console.error('Error uploading files:', error);
-      alert('ファイルのアップロードに失敗しました');
+      throw error;
     }
   };
 
@@ -620,7 +629,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
   };
 
   return (
-    <>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       <ToolbarContainer>
         <div style={{ display: 'flex', gap: '0.25rem' }}>
           <ToolbarButton onClick={handleCreateFile} title="新規ファイル">
@@ -629,7 +638,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
           <ToolbarButton onClick={handleCreateFolder} title="新規フォルダ">
             <FiFolderPlus size={16} />
           </ToolbarButton>
-          <ToolbarButton onClick={() => fileInputRef.current?.click()} title="ファイルアップロード">
+          <ToolbarButton onClick={handleUploadModalOpen} title="ファイル/フォルダアップロード">
             <FiUpload size={16} />
           </ToolbarButton>
           <ToolbarButton onClick={handleSync} title="ファイルシステム同期（Claude Codeで作成されたファイルを表示）">
@@ -655,14 +664,12 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
           .filter(Boolean)}
       </TreeContainer>
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        style={{ display: 'none' }}
-        onChange={handleFileUpload}
+      <UploadModal
+        isOpen={isUploadModalOpen}
+        onClose={handleUploadModalClose}
+        onUpload={handleUpload}
       />
-    </>
+    </div>
   );
 };
 

@@ -42,7 +42,6 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
     try {
       localStorage.setItem('mindcode-ai-cli-provider', selectedProvider);
     } catch (error) {
-      console.warn('Failed to persist AI CLI provider selection:', error);
     }
   }, [selectedProvider]);
 
@@ -123,10 +122,6 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
       try {
         fitAddon.fit();
       } catch (error) {
-        console.warn('[ClaudeTerminal] fitAddon.fit() failed', {
-          context,
-          error: error?.message || error
-        });
       }
     };
 
@@ -180,7 +175,6 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
           window.refreshFileTree();
         }
       } catch (error) {
-        console.warn('Auto-sync failed:', error);
       }
     };
 
@@ -250,12 +244,10 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
       try {
         socketRef.current.emit('terminate_session');
       } catch (emitError) {
-        console.warn('[ClaudeTerminal] failed to emit terminate_session on unload:', emitError);
       }
       try {
         socketRef.current.disconnect();
       } catch (disconnectError) {
-        console.warn('[ClaudeTerminal] failed to disconnect socket on unload:', disconnectError);
       }
     };
 
@@ -289,7 +281,6 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
         try {
           socketRef.current.emit('terminate_session');
         } catch (emitError) {
-          console.warn('[ClaudeTerminal] failed to emit terminate_session during cleanup:', emitError);
         }
         socketRef.current.off('commit_notification', handleCommitNotificationEvent);
         socketRef.current.off('save_complete', handleSaveComplete);

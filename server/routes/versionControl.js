@@ -231,11 +231,8 @@ router.post('/:projectId/commit', verifyToken, async (req, res) => {
     // スマートコミット判定: 実際に内容が変更されている場合のみコミット
     const hasContentChanges = await gitManager.hasContentChanges();
     if (!hasContentChanges) {
-      console.log(`[COMMIT] No content changes detected for project ${projectId}`);
       return res.json({ success: false, message: 'No content changes to commit' });
     }
-
-    console.log(`[COMMIT] Content changes detected for project ${projectId}, proceeding with commit`);
 
     // Add files to staging area (skip if hasContentChanges already added files)
     if (files.length > 0) {
@@ -620,28 +617,15 @@ router.post('/:projectId/restore', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'トリップコードリポジトリが初期化されていません' });
     }
 
-    console.log(`[RESTORE] Project ${projectId} to commit ${commitHash}`);
-
-    // Phase 1: 一時的に自動コミット機能を無効化し、シンプルな復元のみ実行
-    console.log(`  - Phase 1: Simple restore without auto-commit (for testing)`);
-
     // シンプルな復元を実行
-    console.log(`  - Starting direct restore to ${commitHash}...`);
     const restoreResult = await gitManager.restoreToCommit(commitHash);
 
     if (!restoreResult.success) {
       throw new Error(`Failed to restore commit: ${restoreResult.message}`);
     }
 
-    console.log(`  - Restore completed successfully`);
-    console.log(`  - HEAD preserved: ${restoreResult.originalHead}`);
-    console.log(`  - HEAD unchanged: ${restoreResult.headUnchanged}`);
-    console.log(`  - Working tree has changes: ${restoreResult.hasChanges}`);
-
     // 復元後、データベースを物理ファイルと同期
-    console.log(`  - Syncing database with restored files...`);
     const syncResult = await gitManager.syncPhysicalFilesWithDatabase(projectId, req.user.id, db);
-    console.log(`  - Database sync completed: ${syncResult.fileCount} files, ${syncResult.folderCount} folders`);
 
     // 復元が完了したら、last_restored_commit_hashを更新
     await db.execute(`
@@ -650,8 +634,6 @@ router.post('/:projectId/restore', verifyToken, async (req, res) => {
       WHERE project_id = ?`,
       [commitHash, projectId]
     );
-
-    console.log(`  - Restore operation completed successfully`);
 
     res.json({
       success: true,

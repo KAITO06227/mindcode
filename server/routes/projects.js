@@ -128,12 +128,6 @@ h1 {
       }
     } catch (fileError) {
       console.error('Error creating files:', fileError);
-      console.error('Error details:', {
-        code: fileError.code,
-        errno: fileError.errno,
-        syscall: fileError.syscall,
-        path: fileError.path
-      });
       throw new Error(`Failed to create project files: ${fileError.message}`);
     }
 
@@ -148,9 +142,7 @@ h1 {
       // project_filesから削除
       await db.execute('DELETE FROM project_files WHERE project_id = ?', [projectId]);
 
-      console.log(`[PROJECT] Cleared existing file records and versions for project ${projectId}`);
     } catch (cleanupError) {
-      console.warn('Could not clean up existing file records:', cleanupError.message);
     }
 
     const [newProject] = await db.execute('SELECT * FROM projects WHERE id = ?', [projectId]);
@@ -181,9 +173,7 @@ h1 {
 
       // 物理ファイルとデータベースを同期
       try {
-        console.log(`[PROJECT] Syncing files after project creation...`);
         const syncResult = await gitManager.syncPhysicalFilesWithDatabase(projectId, req.user.id, db);
-        console.log(`[PROJECT] Sync completed: ${syncResult.fileCount} files, ${syncResult.folderCount} folders`);
       } catch (syncError) {
         console.error('File sync failed after project creation:', syncError);
         // 同期失敗もプロジェクト作成は成功とする
@@ -197,8 +187,7 @@ h1 {
     res.status(201).json(newProject[0]);
   } catch (error) {
     console.error('Error in project creation:', error);
-    console.error('Error stack:', error.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error creating project',
       error: error.message,
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -269,7 +258,6 @@ router.delete('/:id', verifyToken, async (req, res) => {
     try {
       await fs.rm(projectPath, { recursive: true, force: true });
     } catch (error) {
-      console.warn(`Could not delete project directory at ${projectPath}: ${error.message}`);
     }
 
     // Delete from database (CASCADE will handle related records)

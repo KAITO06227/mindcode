@@ -99,14 +99,15 @@ mindcode/
 - PUT /:id - プロジェクト更新
 - DELETE /:id - プロジェクト削除
 
-### ファイル (/api/files)
-- GET /tree/:projectId - ファイルツリー取得
-- GET /:projectId/:fileId - ファイル内容取得
-- POST /:projectId - ファイル/フォルダ作成
-- PUT /:projectId/:fileId - ファイル更新
-- DELETE /:projectId/:fileId - ファイル削除
-- PATCH /:projectId/:fileId/rename - ファイルリネーム
-- POST /:projectId/upload - ファイルアップロード
+### File System (/api/filesystem)
+- POST /:projectId/files - ファイル作成・更新
+- GET /:projectId/files/:fileId - ファイル内容・メタデータ取得
+- DELETE /:projectId/files/:fileId - ファイル削除
+- GET /:projectId/tree - プロジェクトファイルツリー取得
+- POST /:projectId/upload - 複数ファイル/フォルダアップロード
+- PATCH /:projectId/files/:fileId/rename - ファイルリネーム
+- POST /:projectId/move - ファイル/フォルダ移動
+- POST /:projectId/sync - 物理ファイルとDBの同期
 
 ### Version Control (/api/version-control)
 - POST /:projectId/init - トリップコード初期化
@@ -118,14 +119,6 @@ mindcode/
 - POST /:projectId/checkout - ブランチ切り替え
 - GET /:projectId/diff - ファイル差分取得
 - GET /:projectId/file-at-commit - 特定コミットのファイル取得
-
-### File System (/api/filesystem)
-- POST /:projectId/files - ファイル作成・更新
-- GET /:projectId/files/:fileId - ファイル内容・メタデータ取得
-- DELETE /:projectId/files/:fileId - ファイル削除
-- GET /:projectId/tree - プロジェクトファイルツリー取得
-- POST /:projectId/upload - 複数ファイルアップロード
-- PATCH /:projectId/files/:fileId/rename - ファイルリネーム
 
 ### AI CLI (/api/claude)
 - POST /execute/:projectId - CLIコマンド実行（provider指定でClaude/Codex/Geminiを選択）
@@ -162,10 +155,9 @@ mindcode/
 - エラー処理は厳格モード：失敗時は操作を中止（グレースフル・デグラデーション無し）
 
 ### API設計パターン
-- **Legacy API** (`/api/files`): 従来のシンプルなファイル操作
-- **Enhanced API** (`/api/filesystem`): メタデータ・バージョン管理対応
+- **File System API** (`/api/filesystem`): メタデータ・バージョン管理対応のファイル操作
 - **Version Control API** (`/api/version-control`): Git専用操作
-- プロジェクトによりレガシー/拡張スキーマの自動フォールバック
+- **AI CLI API** (`/api/claude`): マルチAIターミナル統合
 
 ## データベース設計
 
@@ -297,9 +289,10 @@ Claude Code統合はWebSocketベースの`claudeSocket.js`で実装：
 - Git初期化失敗時は具体的なstdout/stderrを含む  
 - ファイルシステム操作失敗時は物理的原因を報告
 
-### フロントエンド統合ポイント  
+### フロントエンド統合ポイント
 - `GitPanel` コンポーネントが Version Control API を呼び出し
-- `FileTree` コンポーネントが File System API と Legacy File API の両方に対応
+- `FileTree` コンポーネントが File System API を呼び出し（ファイル/フォルダアップロード、ドラッグ&ドロップ移動対応）
+- `UploadModal` コンポーネントでファイル/フォルダ選択とプログレスバー表示
 - Monaco Editor は物理ファイルパスから直接読み込み
 
 ### データベース移行が必要な機能

@@ -18,7 +18,6 @@ router.get('/layout', verifyToken, async (req, res) => {
       try {
         storedLayout = JSON.parse(storedLayout);
       } catch (parseError) {
-        console.warn('Failed to parse stored layout JSON:', parseError.message);
       }
     }
 

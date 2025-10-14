@@ -31,7 +31,6 @@ class GitManager {
       try {
         await fs.access(this.projectPath);
       } catch (error) {
-        console.error('Project directory does not exist:', this.projectPath);
         throw new Error(`Project directory not found: ${this.projectPath}`);
       }
 
@@ -67,8 +66,6 @@ node_modules/
       await execAsync(`git config user.name "${userName}"`, { cwd: this.projectPath });
       await execAsync(`git config user.email "${userEmail}"`, { cwd: this.projectPath });
 
-      // ファイルの存在確認
-      const { stdout: files } = await execAsync('ls -la', { cwd: this.projectPath });
       
       // 初期コミット
       const addResult = await execAsync('git add .', { cwd: this.projectPath });
@@ -152,7 +149,6 @@ node_modules/
       const ageMs = Date.now() - stats.mtimeMs;
 
       if (ageMs > maxLockAgeMs) {
-        console.warn(`Stale git index.lock detected (age ${ageMs}ms). Removing...`);
         await fs.unlink(this.indexLockPath);
         return;
       }
@@ -201,14 +197,11 @@ node_modules/
    */
   async hasContentChanges() {
     try {
-      console.log(`[GIT] Checking content changes in ${this.projectPath}`);
-
       // 作業ツリーの変更をチェック
       const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: this.projectPath });
       const hasWorkingChanges = statusOutput && statusOutput.trim().length > 0;
 
       if (!hasWorkingChanges) {
-        console.log(`[GIT] No working tree changes detected`);
         return false;
       }
 
@@ -219,7 +212,6 @@ node_modules/
         lastCommitTree = lastTree.trim();
       } catch (headError) {
         // 初期コミットがない場合（空のリポジトリ）
-        console.log(`[GIT] No HEAD found, treating as initial commit`);
         return true;
       }
 
@@ -229,10 +221,6 @@ node_modules/
       const { stdout: currentTree } = await execAsync('git write-tree', { cwd: this.projectPath });
 
       const hasContentDifference = lastCommitTree !== currentTree.trim();
-
-      console.log(`[GIT] Last commit tree: ${lastCommitTree}`);
-      console.log(`[GIT] Current tree: ${currentTree.trim()}`);
-      console.log(`[GIT] Content difference: ${hasContentDifference}`);
 
       return hasContentDifference;
     } catch (error) {
@@ -309,36 +297,24 @@ node_modules/
    */
   async restoreToCommit(commitHash) {
     try {
-      console.log(`[GIT] Safely restoring working tree to commit ${commitHash} in ${this.projectPath}`);
-
       // 現在のHEADを記録（保護）
       const { stdout: currentHead } = await execAsync('git rev-parse HEAD', { cwd: this.projectPath });
-      console.log(`[GIT] Current HEAD (preserved): ${currentHead.trim()}`);
 
       // ステップ1: 作業ツリーのファイルを全削除（.gitディレクトリなどは除外）
-      console.log(`[GIT] Cleaning working tree (preserving .git)`);
       await this.cleanWorkingTree();
 
       // ステップ2: 指定コミットの状態を復元
       // git checkout {commit} -- . を使用（HEADは変更しない）
-      console.log(`[GIT] Executing git checkout ${commitHash} -- .`);
       const { stdout: checkoutOutput } = await execAsync(`git checkout ${commitHash} -- .`, { cwd: this.projectPath });
-      console.log(`[GIT] Checkout completed: ${checkoutOutput || 'Working tree restored'}`);
 
       // 復元後の状態を確認
       const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: this.projectPath });
       const { stdout: headAfter } = await execAsync('git rev-parse HEAD', { cwd: this.projectPath });
 
-      console.log(`[GIT] HEAD after restore: ${headAfter.trim()} (should be unchanged)`);
-      console.log(`[GIT] Working tree status: ${statusOutput ? 'has staged changes' : 'clean'}`);
-
       const hasChanges = statusOutput && statusOutput.trim().length > 0;
 
       // HEADが変更されていないことを確認
       const headUnchanged = currentHead.trim() === headAfter.trim();
-      if (!headUnchanged) {
-        console.warn(`[GIT] WARNING: HEAD changed unexpectedly from ${currentHead.trim()} to ${headAfter.trim()}`);
-      }
 
       return {
         success: true,
@@ -376,18 +352,14 @@ node_modules/
           if (item.isDirectory()) {
             // ディレクトリを再帰的に削除
             await fs.rm(itemPath, { recursive: true, force: true });
-            console.log(`[GIT] Removed directory: ${item.name}`);
           } else {
             // ファイルを削除
             await fs.unlink(itemPath);
-            console.log(`[GIT] Removed file: ${item.name}`);
           }
         } catch (deleteError) {
-          console.warn(`[GIT] Failed to remove ${item.name}: ${deleteError.message}`);
         }
       }
 
-      console.log(`[GIT] Working tree cleaned successfully`);
     } catch (error) {
       console.error(`[GIT] Failed to clean working tree:`, error);
       throw new Error(`Failed to clean working tree: ${error.message}`);
@@ -399,9 +371,7 @@ node_modules/
    */
   async stashChanges(message = 'Auto-stash before restore') {
     try {
-      console.log(`[GIT] Stashing changes: ${message}`);
       const { stdout } = await execAsync(`git stash push -m "${message}"`, { cwd: this.projectPath });
-      console.log(`[GIT] Stash result: ${stdout.trim()}`);
 
       return {
         success: true,
@@ -409,7 +379,6 @@ node_modules/
       };
     } catch (error) {
       if (error.message.includes('No local changes to save')) {
-        console.log(`[GIT] No changes to stash`);
         return { success: true, message: 'No changes to stash' };
       }
       throw new Error(`Failed to stash changes: ${error.message}`);
@@ -425,7 +394,6 @@ node_modules/
     const crypto = require('crypto');
 
     try {
-      console.log(`[SYNC] Starting file sync for project ${projectId}`);
 
       // 物理ファイルシステムを走査
       const physicalFiles = await this.scanPhysicalFiles(this.projectPath);
@@ -452,20 +420,17 @@ node_modules/
 
         if (!dbFile) {
           // 新しいファイルをデータベースに追加
-          console.log(`[SYNC] Adding new file: ${physicalFile.filePath}`);
           try {
             await this.addFileToDatabase(projectId, physicalFile, userId, db);
             addedCount++;
           } catch (addError) {
             if (addError.code === 'ER_DUP_ENTRY') {
-              console.log(`[SYNC] File ${physicalFile.filePath} already exists in DB, skipping`);
             } else {
               throw addError;
             }
           }
         } else if (dbFile.checksum !== checksum) {
           // ファイル内容が変更された場合は更新
-          console.log(`[SYNC] Updating changed file: ${physicalFile.filePath}`);
           await this.updateFileInDatabase(dbFile.id, physicalFile, userId, db);
           syncedCount++;
         }
@@ -477,13 +442,10 @@ node_modules/
       for (const [filePath, dbFile] of dbFileMap) {
         // .gitignoreやHiddenファイルは除外
         if (!filePath.startsWith('.git') && !filePath.startsWith('.mindcode/')) {
-          console.log(`[SYNC] Removing deleted file from DB: ${filePath}`);
           await db.execute('DELETE FROM project_files WHERE id = ?', [dbFile.id]);
           removedCount++;
         }
       }
-
-      console.log(`[SYNC] Sync completed: ${addedCount} added, ${syncedCount} updated, ${removedCount} removed`);
 
       return {
         success: true,
@@ -549,12 +511,10 @@ node_modules/
               fileSize
             });
           } catch (readError) {
-            console.warn(`[SYNC] Could not read file ${itemPath}: ${readError.message}`);
           }
         }
       }
     } catch (error) {
-      console.warn(`[SYNC] Could not scan directory ${dirPath}: ${error.message}`);
     }
 
     return files;
@@ -593,7 +553,6 @@ node_modules/
         [fileId, file.fileSize, checksum, userId]
       );
     } else {
-      console.log(`[SYNC] Version 1 already exists for file ${fileId}, skipping`);
     }
 
     return fileId;
@@ -682,9 +641,7 @@ node_modules/
    */
   async popStash() {
     try {
-      console.log(`[GIT] Popping latest stash`);
       const { stdout } = await execAsync('git stash pop', { cwd: this.projectPath });
-      console.log(`[GIT] Stash pop result: ${stdout.trim()}`);
 
       return {
         success: true,
@@ -692,7 +649,6 @@ node_modules/
       };
     } catch (error) {
       if (error.message.includes('No stash entries found')) {
-        console.log(`[GIT] No stash to pop`);
         return { success: true, message: 'No stash to pop' };
       }
       throw new Error(`Failed to pop stash: ${error.message}`);

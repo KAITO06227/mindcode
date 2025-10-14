@@ -7,7 +7,8 @@ import {
   FiClock,
   FiUser,
   FiRefreshCw,
-  FiCode
+  FiCode,
+  FiSave
 } from 'react-icons/fi';
 
 const Panel = styled.div`
@@ -140,29 +141,6 @@ const CommitMeta = styled.div`
   color: #999999;
 `;
 
-const TextArea = styled.textarea`
-  background-color: #3c3c3c;
-  border: 1px solid #404040;
-  color: #ffffff;
-  padding: 0.375rem;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  width: 100%;
-  min-height: 60px;
-  resize: vertical;
-  font-family: inherit;
-  margin: 0.25rem 0;
-
-  &:focus {
-    outline: none;
-    border-color: #007acc;
-  }
-
-  &::placeholder {
-    color: #999999;
-  }
-`;
-
 const BranchInfo = styled.div`
   display: flex;
   align-items: center;
@@ -179,9 +157,8 @@ const GitPanel = ({ projectId, onRefresh }) => {
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [commitMessage, setCommitMessage] = useState('');
-  const [showCommitForm, setShowCommitForm] = useState(false);
   const [initializing, setInitializing] = useState(false);
+  const [committing, setCommitting] = useState(false);
   const [commitTooltips, setCommitTooltips] = useState({});
   const [lastRestoredHash, setLastRestoredHash] = useState(null);
   const [activeCommitHash, setActiveCommitHash] = useState(null);
@@ -197,7 +174,6 @@ const GitPanel = ({ projectId, onRefresh }) => {
       // データを並列で取得
       const [statusRes, historyRes] = await Promise.all([
         axios.get(`/api/version-control/${projectId}/status`).catch((error) => {
-          console.warn('Tripcode status fetch warning:', error?.message || error);
           return { data: { initialized: false, hasChanges: false, changes: [] } };
         }),
         axios.get(`/api/version-control/${projectId}/history?limit=all`).catch(() => ({ data: [] }))
@@ -228,7 +204,6 @@ const GitPanel = ({ projectId, onRefresh }) => {
           });
           setCommitTooltips(tooltipRes.data || {});
         } catch (tooltipError) {
-          console.warn('Tripcode prompt tooltip fetch failed:', tooltipError?.message || tooltipError);
         }
       } else {
         setCommitTooltips({});
@@ -262,42 +237,45 @@ const GitPanel = ({ projectId, onRefresh }) => {
     }
   }, [projectId, initializing, fetchGitData]);
 
-  // コミット作成
-  const handleCommit = async () => {
-    if (!commitMessage.trim()) {
-      alert('コミットメッセージを入力してください');
+  // 保存（タイムスタンプでコミット作成）
+  const handleSave = useCallback(async () => {
+    if (!projectId || committing) {
       return;
     }
 
-    try {
-      setLoading(true);
-      const response = await axios.post(`/api/version-control/${projectId}/commit`, {
-        message: commitMessage.trim()
-      });
-      const result = response.data;
+    const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-      if (!result?.success) {
-        alert(result?.message || 'コミットできませんでした');
-        return;
+    try {
+      setCommitting(true);
+      const response = await axios.post(`/api/version-control/${projectId}/commit`, {
+        message: timestamp
+      });
+
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || '保存に失敗しました');
       }
 
-      setCommitMessage('');
-      setShowCommitForm(false);
       await fetchGitData();
 
       if (onRefresh) {
-        onRefresh(); // ファイルツリーをリフレッシュ
+        onRefresh();
       }
 
       setLastRestoredHash(null);
+      window.dispatchEvent(new CustomEvent('mindcode:gitUpdated'));
 
     } catch (error) {
-      console.error('Commit error:', error);
-      alert('コミットエラー: ' + (error.response?.data?.message || error.message));
+      console.error('Save commit error:', error);
+      const rawMessage = error.response?.data?.message || error.message;
+      if (/no changes|nothing to commit/i.test(rawMessage || '')) {
+        alert('前回から変更がありません。');
+      } else {
+        alert('保存に失敗しました: ' + rawMessage);
+      }
     } finally {
-      setLoading(false);
+      setCommitting(false);
     }
-  };
+  }, [projectId, committing, fetchGitData, onRefresh]);
 
   // コミットに復元
   const handleRestoreCommit = async (commit) => {
@@ -316,22 +294,16 @@ const GitPanel = ({ projectId, onRefresh }) => {
     try {
       setLoading(true);
 
-      console.log(`[RESTORE] Starting restore to commit: ${commit.hash}`);
-
       const response = await axios.post(`/api/version-control/${projectId}/restore`, {
         commitHash: commit.hash
       });
-
-      console.log(`[RESTORE] Server response:`, response.data);
 
       if (response.data?.success) {
         setLastRestoredHash(commit.hash);
 
         // 段階的にUIを更新
-        console.log(`[RESTORE] Updating Git data...`);
         await fetchGitData();
 
-        console.log(`[RESTORE] Refreshing file tree...`);
         if (onRefresh) {
           onRefresh();
         }
@@ -405,26 +377,25 @@ const GitPanel = ({ projectId, onRefresh }) => {
           トリップコード バージョン管理
         </Title>
         <Controls>
-          <Button onClick={fetchGitData} disabled={loading} title="リフレッシュ">
+          <Button onClick={fetchGitData} title="リフレッシュ">
             <FiRefreshCw />
           </Button>
           {status?.initialized === false && (
             <Button
               $primary
               onClick={handleInitRepository}
-              disabled={loading || initializing}
+              disabled={initializing}
               title="トリップコードリポジトリを初期化"
             >
               {initializing ? '初期化中...' : 'トリップコード初期化'}
             </Button>
           )}
-          <Button 
-            $primary 
-            onClick={() => setShowCommitForm(!showCommitForm)}
-            disabled={loading || status?.initialized === false}
-            title="コミット作成"
+          <Button
+            $primary
+            onClick={handleSave}
+            title="保存（コミット作成）"
           >
-            <FiGitCommit />
+            <FiSave />
           </Button>
         </Controls>
       </Header>
@@ -439,30 +410,6 @@ const GitPanel = ({ projectId, onRefresh }) => {
             </BranchInfo>
           </Section>
         )}
-
-        {/* コミットフォーム */}
-        {showCommitForm && (
-          <Section>
-            <SectionHeader>新しいコミット</SectionHeader>
-            <TextArea
-              value={commitMessage}
-              onChange={(e) => setCommitMessage(e.target.value)}
-              placeholder="コミットメッセージを入力..."
-              rows={3}
-            />
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <Button $primary onClick={handleCommit} disabled={loading}>
-                コミット
-              </Button>
-              <Button onClick={() => setShowCommitForm(false)}>
-                キャンセル
-              </Button>
-            </div>
-          </Section>
-        )}
-
-        {/* ブランチ管理 */}
-        {/* ブランチ機能を削除 */}
 
         {/* コミット履歴 */}
         <Section>

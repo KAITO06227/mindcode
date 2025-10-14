@@ -9,13 +9,11 @@ function initFileTreeEvents(io) {
     const { projectId, token } = socket.handshake.query;
 
     if (!projectId) {
-      console.warn('file-events: connection without projectId, disconnecting');
       socket.disconnect();
       return;
     }
 
     if (!token) {
-      console.warn('file-events: connection without token, disconnecting');
       socket.disconnect();
       return;
     }
@@ -25,7 +23,6 @@ function initFileTreeEvents(io) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       userId = decoded?.id;
     } catch (error) {
-      console.warn('file-events: invalid token, disconnecting');
       socket.disconnect();
       return;
     }

@@ -166,7 +166,6 @@ router.post('/send/:projectId', verifyToken, async (req, res) => {
         [req.params.projectId, req.user.id, message.trim(), null]
       );
     } catch (logError) {
-      console.warn('Failed to log Claude prompt:', logError.message);
     }
 
     // Send message

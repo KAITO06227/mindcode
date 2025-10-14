@@ -140,7 +140,6 @@ router.delete('/projects/:id', verifyToken, isTeacher, async (req, res) => {
     try {
       await fs.rm(projectPath, { recursive: true, force: true });
     } catch (error) {
-      console.warn(`Could not delete project directory at ${projectPath}: ${error.message}`);
     }
 
     // Delete from database (CASCADE will handle related records)
