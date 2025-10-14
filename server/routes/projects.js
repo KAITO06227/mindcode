@@ -1,5 +1,6 @@
 const express = require('express');
 const { verifyToken } = require('../middleware/auth');
+const { requireProjectAccess, addProjectMember } = require('../middleware/projectAccess');
 const db = require('../database/connection');
 const fs = require('fs').promises;
 const path = require('path');
@@ -12,15 +13,33 @@ const {
 } = require('../utils/userWorkspace');
 const router = express.Router();
 
-// Get user projects
+// Get user projects (including projects where user is a member)
 router.get('/', verifyToken, async (req, res) => {
   try {
-    const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE user_id = ? ORDER BY updated_at DESC',
+    // Get all projects owned by the user
+    const [ownedProjects] = await db.execute(
+      `SELECT p.*, NULL as user_role
+       FROM projects p
+       WHERE p.user_id = ?
+       ORDER BY p.updated_at DESC`,
       [req.user.id]
     );
-    res.json(projects);
+
+    // Get all projects where user is a member (but not owner)
+    const [sharedProjects] = await db.execute(
+      `SELECT p.*, pm.role as user_role
+       FROM projects p
+       INNER JOIN project_members pm ON p.id = pm.project_id
+       WHERE pm.user_id = ? AND p.user_id != ?
+       ORDER BY p.updated_at DESC`,
+      [req.user.id, req.user.id]
+    );
+
+    // Combine both lists
+    const allProjects = [...ownedProjects, ...sharedProjects];
+    res.json(allProjects);
   } catch (error) {
+    console.error('Error fetching projects:', error);
     res.status(500).json({ message: 'Error fetching projects' });
   }
 });
@@ -146,12 +165,20 @@ h1 {
     }
 
     const [newProject] = await db.execute('SELECT * FROM projects WHERE id = ?', [projectId]);
-    
+
     if (newProject.length === 0) {
       console.error('Project was created but could not be retrieved from database');
       return res.status(500).json({ message: 'Project created but could not be retrieved' });
     }
-    
+
+    // プロジェクトオーナーをproject_membersに追加
+    try {
+      await addProjectMember(projectId, req.user.id, 'owner');
+    } catch (memberError) {
+      console.error('Failed to add project owner to members:', memberError);
+      // 失敗してもプロジェクト作成は成功とする
+    }
+
     // トリップコード初期化をプロジェクト作成時に実行
     try {
       const GitManager = require('../utils/gitManager');
@@ -196,11 +223,63 @@ h1 {
 });
 
 // Get project details
-router.get('/:id', verifyToken, async (req, res) => {
+router.get('/:id', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [req.params.id, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (projects.length === 0) {
+      return res.status(404).json({ message: 'Project not found' });
+    }
+
+    const project = {
+      ...projects[0],
+      userRole: req.projectRole
+    };
+
+    res.json(project);
+  } catch (error) {
+    console.error('Error fetching project:', error);
+    res.status(500).json({ message: 'Error fetching project' });
+  }
+});
+
+// Update project (requires editor role)
+router.put('/:id', verifyToken, requireProjectAccess('editor'), async (req, res) => {
+  try {
+    const { name, description } = req.body;
+
+    await db.execute(
+      'UPDATE projects SET name = ?, description = ?, updated_at = NOW() WHERE id = ?',
+      [name, description, req.params.id]
+    );
+
+    const [updatedProject] = await db.execute(
+      'SELECT * FROM projects WHERE id = ?',
+      [req.params.id]
+    );
+
+    res.json({
+      ...updatedProject[0],
+      userRole: req.projectRole
+    });
+  } catch (error) {
+    console.error('Error updating project:', error);
+    res.status(500).json({ message: 'Error updating project' });
+  }
+});
+
+// Delete project (requires owner role)
+router.delete('/:id', verifyToken, requireProjectAccess('owner'), async (req, res) => {
+  try {
+    const projectId = req.params.id;
+
+    // Get project info
+    const [projects] = await db.execute(
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
@@ -208,78 +287,46 @@ router.get('/:id', verifyToken, async (req, res) => {
     }
 
     const project = projects[0];
-    
-    // トリップコード初期化は別途APIで実行するため、ここでは処理しない
-
-    res.json(project);
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching project' });
-  }
-});
-
-// Update project
-router.put('/:id', verifyToken, async (req, res) => {
-  try {
-    const { name, description } = req.body;
-    
-    await db.execute(
-      'UPDATE projects SET name = ?, description = ?, updated_at = NOW() WHERE id = ? AND user_id = ?',
-      [name, description, req.params.id, req.user.id]
-    );
-
-    const [updatedProject] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [req.params.id, req.user.id]
-    );
-
-    res.json(updatedProject[0]);
-  } catch (error) {
-    res.status(500).json({ message: 'Error updating project' });
-  }
-});
-
-// Delete project
-router.delete('/:id', verifyToken, async (req, res) => {
-  try {
-    const projectId = req.params.id;
-    
-    // Verify project ownership
-    const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
-    );
-
-    if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
-    }
 
     // Delete project directory
-    const projectPath = getProjectPath(req.user, projectId);
+    // Get owner's email for workspace path resolution
+    const [owners] = await db.execute(
+      'SELECT id, email FROM users WHERE id = ?',
+      [project.user_id]
+    );
+
+    if (owners.length === 0) {
+      return res.status(500).json({ message: 'Project owner not found' });
+    }
+
+    const projectOwner = { id: owners[0].id, email: owners[0].email };
+    const projectPath = getProjectPath(projectOwner, projectId);
     try {
       await fs.rm(projectPath, { recursive: true, force: true });
     } catch (error) {
+      console.error('Error deleting project directory:', error);
     }
 
-    // Delete from database (CASCADE will handle related records)
+    // Delete from database (CASCADE will handle related records including project_members)
     const [deleteResult] = await db.execute(
-      'DELETE FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'DELETE FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (deleteResult.affectedRows === 0) {
       return res.status(404).json({ message: 'Project not found' });
     }
 
-    res.json({ 
+    res.json({
       message: 'Project deleted successfully',
       projectId: projectId,
-      projectName: projects[0].name
+      projectName: project.name
     });
   } catch (error) {
     console.error('Error deleting project:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error deleting project',
-      error: error.message 
+      error: error.message
     });
   }
 });

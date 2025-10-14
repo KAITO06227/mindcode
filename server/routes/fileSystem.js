@@ -1,5 +1,6 @@
 const express = require('express');
 const { verifyToken } = require('../middleware/auth');
+const { requireProjectAccess } = require('../middleware/projectAccess');
 const db = require('../database/connection');
 const fs = require('fs').promises;
 const path = require('path');
@@ -14,7 +15,7 @@ const { emitFileTreeUpdate } = require('../sockets/fileTreeEvents');
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: async (req, file, cb) => {
-    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     cb(null, projectPath);
   },
@@ -89,8 +90,8 @@ async function logFileAccess(fileId, userId, accessType, req) {
   }
 }
 
-// POST /api/filesystem/:projectId/files - Create or update file/folder
-router.post('/:projectId/files', verifyToken, async (req, res) => {
+// POST /api/filesystem/:projectId/files - Create or update file/folder (requires editor role)
+router.post('/:projectId/files', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const {
       filePath,
@@ -99,16 +100,6 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
       isFolder = false
     } = req.body;
     const projectId = req.params.projectId;
-    
-    // Verify project ownership
-    const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
-    );
-
-    if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
-    }
 
     // パス構築：filePathの扱いを修正
     const trimmedFilePath = filePath ? filePath.trim() : '';
@@ -140,7 +131,15 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
 
     // Normalize path to posix-style for DB consistency
     relativeFilePath = relativeFilePath.replace(/\\/g, '/');
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+
+    // Get project owner info for file system path
+    const [projects] = await db.execute(
+      'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
+    );
+
+    const projectOwner = { id: projects[0].user_id, email: projects[0].email };
+    const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
     const fullFilePath = path.join(projectPath, relativeFilePath);
 
     if (isFolder) {
@@ -278,26 +277,25 @@ router.post('/:projectId/files', verifyToken, async (req, res) => {
 // プロジェクト保存エンドポイントは無効化された状態のまま
 // router.post('/:projectId/save', verifyToken, async (req, res) => { ... });
 
-// GET /api/filesystem/:projectId/files/:fileId - Get file content and metadata
-router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
+// GET /api/filesystem/:projectId/files/:fileId - Get file content and metadata (requires viewer role)
+router.get('/:projectId/files/:fileId', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { projectId, fileId } = req.params;
     const { version } = req.query; // Optional version parameter
-    
-    // Get file with project ownership check
+
+    // Get file metadata
     const [files] = await db.execute(`
-      SELECT pf.*, p.user_id as project_owner,
+      SELECT pf.*,
              u1.name as created_by_name, u2.name as updated_by_name
       FROM project_files pf
-      JOIN projects p ON pf.project_id = p.id
       LEFT JOIN users u1 ON pf.created_by = u1.id
       LEFT JOIN users u2 ON pf.updated_by = u2.id
-      WHERE pf.id = ? AND pf.project_id = ? AND p.user_id = ?`,
-      [fileId, projectId, req.user.id]
+      WHERE pf.id = ? AND pf.project_id = ?`,
+      [fileId, projectId]
     );
 
     if (files.length === 0) {
-      return res.status(404).json({ message: 'File not found or access denied' });
+      return res.status(404).json({ message: 'File not found' });
     }
 
     const file = files[0];
@@ -318,7 +316,14 @@ router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
       const versionRecord = versions.find(v => v.version_number == version);
       if (versionRecord && versionRecord.git_commit_hash) {
         try {
-          const projectPath = await resolveExistingProjectPath(req.user, projectId);
+          // Get project owner info for file system path
+          const [projects] = await db.execute(
+            'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+            [projectId]
+          );
+
+          const projectOwner = { id: projects[0].user_id, email: projects[0].email };
+          const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
           const gitManager = new GitManager(projectPath);
           const historicalContent = await gitManager.getFileAtCommit(file.file_path, versionRecord.git_commit_hash);
           if (historicalContent !== null) {
@@ -348,26 +353,32 @@ router.get('/:projectId/files/:fileId', verifyToken, async (req, res) => {
   }
 });
 
-// DELETE /api/filesystem/:projectId/files/:fileId - Delete file
-router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
+// DELETE /api/filesystem/:projectId/files/:fileId - Delete file (requires editor role)
+router.delete('/:projectId/files/:fileId', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const { projectId, fileId } = req.params;
 
-    // Get file with project ownership check
+    // Get file metadata
     const [files] = await db.execute(`
-      SELECT pf.*, p.user_id as project_owner
-      FROM project_files pf
-      JOIN projects p ON pf.project_id = p.id
-      WHERE pf.id = ? AND pf.project_id = ? AND p.user_id = ?`,
-      [fileId, projectId, req.user.id]
+      SELECT pf.* FROM project_files pf
+      WHERE pf.id = ? AND pf.project_id = ?`,
+      [fileId, projectId]
     );
 
     if (files.length === 0) {
-      return res.status(404).json({ message: 'File not found or access denied' });
+      return res.status(404).json({ message: 'File not found' });
     }
 
     const file = files[0];
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+
+    // Get project owner info for file system path
+    const [projects] = await db.execute(
+      'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
+    );
+
+    const projectOwner = { id: projects[0].user_id, email: projects[0].email };
+    const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
     const fullFilePath = path.join(projectPath, file.file_path);
 
     // フォルダの場合、中身を再帰的に削除する必要がある
@@ -375,12 +386,11 @@ router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
     if (file.file_type === 'folder') {
       // フォルダ内のすべてのファイル/フォルダを取得
       const [childFiles] = await db.execute(`
-        SELECT pf.* FROM project_files pf 
-        JOIN projects p ON pf.project_id = p.id 
-        WHERE pf.project_id = ? AND p.user_id = ? 
+        SELECT pf.* FROM project_files pf
+        WHERE pf.project_id = ?
         AND (pf.file_path LIKE ? OR pf.file_path = ?)
         ORDER BY LENGTH(pf.file_path) DESC`,
-        [projectId, req.user.id, `${file.file_path}/%`, file.file_path]
+        [projectId, `${file.file_path}/%`, file.file_path]
       );
       filesToDelete = childFiles;
     }
@@ -452,8 +462,8 @@ router.delete('/:projectId/files/:fileId', verifyToken, async (req, res) => {
   }
 });
 
-// POST /api/filesystem/:projectId/move - Move file or folder to another directory
-router.post('/:projectId/move', verifyToken, async (req, res) => {
+// POST /api/filesystem/:projectId/move - Move file or folder to another directory (requires editor role)
+router.post('/:projectId/move', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { sourcePath, destinationPath = '' } = req.body;
@@ -466,16 +476,19 @@ router.post('/:projectId/move', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'destinationPath must be a string' });
     }
 
+    // Get project owner info for file system path
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectOwner = { id: projects[0].user_id, email: projects[0].email };
+
+    const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
     const sourceRelativePath = sourcePath.replace(/^\/+/, '');
     const destinationFolderPath = destinationPath.replace(/^\/+/, '').replace(/\/+$/, '');
 
@@ -585,17 +598,25 @@ router.post('/:projectId/move', verifyToken, async (req, res) => {
   }
 });
 
-// GET /api/filesystem/:projectId/tree - Get project file tree with metadata
-router.get('/:projectId/tree', verifyToken, async (req, res) => {
+// GET /api/filesystem/:projectId/tree - Get project file tree with metadata (requires viewer role)
+router.get('/:projectId/tree', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { sync } = req.query; // ?sync=true で同期を実行
+
+    // Get project owner info for file system path
+    const [projects] = await db.execute(
+      'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
+    );
+
+    const projectOwner = { id: projects[0].user_id, email: projects[0].email };
 
     // 同期オプションが指定されている場合、物理ファイルとDBを同期
     if (sync === 'true') {
       try {
         const GitManager = require('../utils/gitManager');
-        const projectPath = await resolveExistingProjectPath(req.user, projectId);
+        const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
         const gitManager = new GitManager(projectPath);
 
         const syncResult = await gitManager.syncPhysicalFilesWithDatabase(projectId, req.user.id, db);
@@ -607,17 +628,16 @@ router.get('/:projectId/tree', verifyToken, async (req, res) => {
 
     // Get all files with metadata
     const [files] = await db.execute(`
-      SELECT pf.*, 
-             u1.name as created_by_name, 
+      SELECT pf.*,
+             u1.name as created_by_name,
              u2.name as updated_by_name,
              (SELECT COUNT(*) FROM file_versions WHERE file_id = pf.id) as version_count
-      FROM project_files pf 
-      JOIN projects p ON pf.project_id = p.id 
+      FROM project_files pf
       LEFT JOIN users u1 ON pf.created_by = u1.id
       LEFT JOIN users u2 ON pf.updated_by = u2.id
-      WHERE pf.project_id = ? AND p.user_id = ?
+      WHERE pf.project_id = ?
       ORDER BY pf.file_path`,
-      [projectId, req.user.id]
+      [projectId]
     );
 
     // Build enhanced tree structure
@@ -690,26 +710,28 @@ router.get('/:projectId/tree', verifyToken, async (req, res) => {
   }
 });
 
-// POST /api/filesystem/:projectId/upload - Upload multiple files
-router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req, res) => {
+// POST /api/filesystem/:projectId/upload - Upload multiple files (requires editor role)
+router.post('/:projectId/upload', verifyToken, requireProjectAccess('editor'), upload.array('files'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const targetPath = req.body.targetPath || '';
     const relativePaths = req.body.relativePaths || [];
 
-    // Verify project ownership
+    // Get project owner info for file system path
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
+
+    const projectOwner = { id: projects[0].user_id, email: projects[0].email };
 
     const uploadedFiles = [];
     const createdFolders = new Set();
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
 
     for (let i = 0; i < req.files.length; i++) {
       const file = req.files[i];
@@ -846,8 +868,8 @@ router.post('/:projectId/upload', verifyToken, upload.array('files'), async (req
   }
 });
 
-// PATCH /api/filesystem/:projectId/files/:fileId/rename - Rename file
-router.patch('/:projectId/files/:fileId/rename', verifyToken, async (req, res) => {
+// PATCH /api/filesystem/:projectId/files/:fileId/rename - Rename file (requires editor role)
+router.patch('/:projectId/files/:fileId/rename', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const { projectId, fileId } = req.params;
     const { newName } = req.body;
@@ -856,21 +878,27 @@ router.patch('/:projectId/files/:fileId/rename', verifyToken, async (req, res) =
       return res.status(400).json({ message: 'New name is required' });
     }
 
-    // Get file with project ownership check
+    // Get file metadata
     const [files] = await db.execute(`
-      SELECT pf.*, p.user_id as project_owner
-      FROM project_files pf
-      JOIN projects p ON pf.project_id = p.id
-      WHERE pf.id = ? AND pf.project_id = ? AND p.user_id = ?`,
-      [fileId, projectId, req.user.id]
+      SELECT pf.* FROM project_files pf
+      WHERE pf.id = ? AND pf.project_id = ?`,
+      [fileId, projectId]
     );
 
     if (files.length === 0) {
-      return res.status(404).json({ message: 'File not found or access denied' });
+      return res.status(404).json({ message: 'File not found' });
     }
 
     const file = files[0];
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+
+    // Get project owner info for file system path
+    const [projects] = await db.execute(
+      'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
+    );
+
+    const projectOwner = { id: projects[0].user_id, email: projects[0].email };
+    const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
     const oldFilePath = path.join(projectPath, file.file_path);
     
     // Calculate new paths
@@ -932,22 +960,23 @@ router.patch('/:projectId/files/:fileId/rename', verifyToken, async (req, res) =
   }
 });
 
-// POST /api/filesystem/:projectId/sync - Sync physical filesystem with database
-router.post('/:projectId/sync', verifyToken, async (req, res) => {
+// POST /api/filesystem/:projectId/sync - Sync physical filesystem with database (requires editor role)
+router.post('/:projectId/sync', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const { projectId } = req.params;
-    
-    // Verify project ownership
+
+    // Get project owner info for file system path
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectOwner = { id: projects[0].user_id, email: projects[0].email };
+    const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
     
     
     // Get existing files from database

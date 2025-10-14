@@ -42,10 +42,15 @@ const fileSystemRoutes = require('./routes/fileSystem');
 const versionControlRoutes = require('./routes/versionControl');
 const userSettingsRoutes = require('./routes/userSettings');
 const userProjectStaticRoutes = require('./routes/userProjectStatic');
+const projectMembersRoutes = require('./routes/projectMembers');
+const projectInvitationsRoutes = require('./routes/projectInvitations');
 const { initFileTreeEvents } = require('./sockets/fileTreeEvents');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
+app.use('/api/projects', projectMembersRoutes); // Multi-user collaboration: members
+app.use('/api/projects', projectInvitationsRoutes); // Multi-user collaboration: invitations
+app.use('/api', projectInvitationsRoutes); // Invitation acceptance routes without /projects prefix
 app.use('/api/claude', claudeRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/filesystem', fileSystemRoutes); // New filesystem API

@@ -1,6 +1,7 @@
 const express = require('express');
 const { resolveExistingProjectPath } = require('../utils/userWorkspace');
 const { serveProjectAsset } = require('../utils/projectPreviewUtils');
+const db = require('../database/connection');
 
 const router = express.Router();
 
@@ -17,7 +18,7 @@ const handleProjectAssetRequest = (defaultPath) => async (req, res) => {
       return;
     }
 
-    const projectRoot = await resolveExistingProjectPath({ email: emailParam }, projectDirParam);
+    const projectRoot = await resolveExistingProjectPath({ email: emailParam }, projectDirParam, db);
 
     await serveProjectAsset({
       projectRoot,

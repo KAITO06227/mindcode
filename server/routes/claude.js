@@ -1,5 +1,6 @@
 const express = require('express');
 const { verifyToken } = require('../middleware/auth');
+const { requireProjectAccess } = require('../middleware/projectAccess');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
@@ -39,10 +40,10 @@ async function ensureClaudeCliConfig(homeDir) {
 }
 
 // Start Claude Code for a project
-router.post('/start/:projectId', verifyToken, async (req, res) => {
+router.post('/start/:projectId', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
-    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId);
-    const processKey = `${req.user.id}_${req.params.projectId}`;
+    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId, db);
+    const processKey = req.params.projectId; // プロジェクト単位で共有
 
     // Check if project directory exists
     try {
@@ -125,10 +126,10 @@ router.post('/start/:projectId', verifyToken, async (req, res) => {
 });
 
 // Send message to Claude Code
-router.post('/send/:projectId', verifyToken, async (req, res) => {
+router.post('/send/:projectId', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { message } = req.body;
-    const processKey = `${req.user.id}_${req.params.projectId}`;
+    const processKey = req.params.projectId; // プロジェクト単位で共有
 
     if (!message || !message.trim()) {
       return res.status(400).json({
@@ -137,18 +138,6 @@ router.post('/send/:projectId', verifyToken, async (req, res) => {
       });
     }
 
-    // Verify project ownership before forwarding to Claude
-    const [projects] = await db.execute(
-      'SELECT id FROM projects WHERE id = ? AND user_id = ?',
-      [req.params.projectId, req.user.id]
-    );
-
-    if (projects.length === 0) {
-      return res.status(403).json({
-        success: false,
-        message: 'Project not found or access denied'
-      });
-    }
     // Get Claude process
     const claudeProcess = claudeProcesses.get(processKey);
     
@@ -187,9 +176,9 @@ router.post('/send/:projectId', verifyToken, async (req, res) => {
 });
 
 // Check Claude Code status
-router.get('/status/:projectId', verifyToken, (req, res) => {
+router.get('/status/:projectId', verifyToken, requireProjectAccess('viewer'), (req, res) => {
   try {
-    const processKey = `${req.user.id}_${req.params.projectId}`;
+    const processKey = req.params.projectId; // プロジェクト単位で共有
     const claudeProcess = claudeProcesses.get(processKey);
     
     if (!claudeProcess) {
@@ -230,10 +219,10 @@ router.get('/status/:projectId', verifyToken, (req, res) => {
 });
 
 // Get Claude Code output (Server-Sent Events)
-router.get('/stream/:projectId', verifyToken, (req, res) => {
+router.get('/stream/:projectId', verifyToken, requireProjectAccess('viewer'), (req, res) => {
   try {
-    const processKey = `${req.user.id}_${req.params.projectId}`;
-    
+    const processKey = req.params.projectId; // プロジェクト単位で共有
+
     const claudeProcess = claudeProcesses.get(processKey);
     
     if (!claudeProcess) {
@@ -336,10 +325,10 @@ router.get('/stream/:projectId', verifyToken, (req, res) => {
 });
 
 // Simple Claude Code execution endpoint
-router.post('/execute/:projectId', verifyToken, async (req, res) => {
+router.post('/execute/:projectId', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { prompt } = req.body;
-    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, req.params.projectId, db);
 
     // Check if project directory exists
     try {

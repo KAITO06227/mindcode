@@ -3,8 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
 import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
-import { FiPlus, FiFolder, FiSettings, FiLogOut, FiGithub, FiTrash2 } from 'react-icons/fi';
+import { FiPlus, FiFolder, FiSettings, FiLogOut, FiGithub, FiTrash2, FiBell } from 'react-icons/fi';
 import CreateProjectModal from '../components/CreateProjectModal';
+import InvitationNotification from '../components/InvitationNotification';
 
 const DashboardContainer = styled.div`
   min-height: 100vh;
@@ -157,7 +158,7 @@ const ActionButton = styled.button`
 const ProjectTitle = styled.h4`
   color: #ffffff;
   font-size: 1.125rem;
-  margin-bottom: 0.5rem;
+  margin: 0;
 `;
 
 const ProjectDescription = styled.p`
@@ -175,6 +176,24 @@ const ProjectMeta = styled.div`
   font-size: 0.75rem;
 `;
 
+const RoleBadge = styled.span`
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  background-color: ${props => props.$role === 'owner' ? '#2d3748' : '#2c5282'};
+  color: ${props => props.$role === 'owner' ? '#fbbf24' : '#63b3ed'};
+  margin-bottom: 0.5rem;
+  display: inline-block;
+`;
+
+const ProjectHeader = styled.div`
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 0.5rem;
+`;
+
 const EmptyState = styled.div`
   text-align: center;
   padding: 3rem 1rem;
@@ -190,11 +209,13 @@ const DashboardPage = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [projects, setProjects] = useState([]);
+  const [invitations, setInvitations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   useEffect(() => {
     fetchProjects();
+    fetchInvitations();
   }, []);
 
   const fetchProjects = async () => {
@@ -207,6 +228,19 @@ const DashboardPage = () => {
       setLoading(false);
     }
   };
+
+  const fetchInvitations = async () => {
+    try {
+      const response = await axios.get('/api/invitations/my');
+      setInvitations(response.data.invitations || []);
+    } catch (error) {
+      console.error('Error fetching invitations:', error);
+    }
+  };
+
+  // プロジェクトを自分のプロジェクトと共有プロジェクトに分類
+  const myProjects = projects.filter(p => p.user_id === user?.id);
+  const sharedProjects = projects.filter(p => p.user_id !== user?.id && (p.user_role || p.role));
 
   const handleProjectClick = (projectId) => {
     navigate(`/ide/${projectId}`);
@@ -239,6 +273,15 @@ const DashboardPage = () => {
       console.error('Error deleting project:', error);
       alert('プロジェクトの削除に失敗しました: ' + (error.response?.data?.message || error.message));
     }
+  };
+
+  const handleInvitationResponse = async (action, invitationId) => {
+    if (action === 'accepted') {
+      // 招待を承諾した場合、プロジェクト一覧を再取得
+      await fetchProjects();
+    }
+    // 招待一覧から削除
+    setInvitations(prev => prev.filter(inv => inv.id !== invitationId));
   };
 
   const formatDate = (dateString) => {
@@ -289,16 +332,34 @@ const DashboardPage = () => {
           </WelcomeText>
         </WelcomeSection>
 
+        {invitations.length > 0 && (
+          <ProjectsSection>
+            <SectionHeader>
+              <SectionTitle>
+                <FiBell size={20} style={{ marginRight: '0.5rem', display: 'inline' }} />
+                招待通知 ({invitations.length})
+              </SectionTitle>
+            </SectionHeader>
+            {invitations.map(invitation => (
+              <InvitationNotification
+                key={invitation.id}
+                invitation={invitation}
+                onResponse={handleInvitationResponse}
+              />
+            ))}
+          </ProjectsSection>
+        )}
+
         <ProjectsSection>
           <SectionHeader>
-            <SectionTitle>あなたのプロジェクト</SectionTitle>
+            <SectionTitle>マイプロジェクト</SectionTitle>
             <Button $variant="primary" onClick={() => setShowCreateModal(true)}>
               <FiPlus size={16} />
               新規プロジェクト
             </Button>
           </SectionHeader>
 
-          {projects.length === 0 ? (
+          {myProjects.length === 0 ? (
             <EmptyState>
               <EmptyIcon>
                 <FiFolder size={48} />
@@ -308,13 +369,13 @@ const DashboardPage = () => {
             </EmptyState>
           ) : (
             <ProjectsGrid>
-              {projects.map(project => (
-                <ProjectCard 
+              {myProjects.map(project => (
+                <ProjectCard
                   key={project.id}
                   onClick={() => handleProjectClick(project.id)}
                 >
                   <ProjectActions>
-                    <ActionButton 
+                    <ActionButton
                       className="danger"
                       onClick={(e) => handleDeleteProject(project.id, project.name, e)}
                       title="プロジェクトを削除"
@@ -323,8 +384,11 @@ const DashboardPage = () => {
                       削除
                     </ActionButton>
                   </ProjectActions>
-                  
-                  <ProjectTitle>{project.name}</ProjectTitle>
+
+                  <ProjectHeader>
+                    <ProjectTitle>{project.name}</ProjectTitle>
+                    <RoleBadge $role="owner">オーナー</RoleBadge>
+                  </ProjectHeader>
                   <ProjectDescription>
                     {project.description || '説明がありません'}
                   </ProjectDescription>
@@ -339,6 +403,39 @@ const DashboardPage = () => {
             </ProjectsGrid>
           )}
         </ProjectsSection>
+
+        {sharedProjects.length > 0 && (
+          <ProjectsSection>
+            <SectionHeader>
+              <SectionTitle>共有プロジェクト</SectionTitle>
+            </SectionHeader>
+            <ProjectsGrid>
+              {sharedProjects.map(project => {
+                const userRole = project.user_role || project.role;
+                return (
+                  <ProjectCard
+                    key={project.id}
+                    onClick={() => handleProjectClick(project.id)}
+                  >
+                    <ProjectHeader>
+                      <ProjectTitle>{project.name}</ProjectTitle>
+                      <RoleBadge $role={userRole}>メンバー</RoleBadge>
+                    </ProjectHeader>
+                    <ProjectDescription>
+                      {project.description || '説明がありません'}
+                    </ProjectDescription>
+                    <ProjectMeta>
+                      <span>更新日 {formatDate(project.updated_at)}</span>
+                      {project.git_url && (
+                        <FiGithub title="トリップコードリポジトリ接続済み" />
+                      )}
+                    </ProjectMeta>
+                  </ProjectCard>
+                );
+              })}
+            </ProjectsGrid>
+          </ProjectsSection>
+        )}
       </Main>
 
       {showCreateModal && (

@@ -84,6 +84,12 @@ mindcode/
 - 作成、削除、リネーム
 - 階層構造の管理
 
+### マルチユーザーコラボレーション（NEW）
+- プロジェクトメンバー管理（オーナー、編集者、閲覧者）
+- メール招待システム（トークンベース）
+- ロールベースアクセス制御（RBAC）
+- 共有プロジェクトの一覧表示
+
 ## API エンドポイント
 
 ### 認証 (/api/auth)
@@ -123,6 +129,20 @@ mindcode/
 ### AI CLI (/api/claude)
 - POST /execute/:projectId - CLIコマンド実行（provider指定でClaude/Codex/Geminiを選択）
 - POST /session/:projectId - インタラクティブセッション開始（デフォルトはClaude Code）
+
+### プロジェクトメンバー (/api/projects/:projectId/members)
+- GET / - メンバー一覧取得（viewer以上）
+- POST / - メンバー追加（editor以上、editorの追加はownerのみ）
+- PATCH /:userId - メンバーロール更新（ownerのみ）
+- DELETE /:userId - メンバー削除（ownerまたは本人）
+
+### プロジェクト招待 (/api/projects/:projectId/invitations、/api/invitations)
+- GET /:projectId/invitations - 招待一覧取得（editor以上）
+- POST /:projectId/invitations - 招待作成（editor以上、editorの招待はownerのみ）
+- GET /invitations/:token - 招待情報取得（認証不要）
+- POST /invitations/:token/accept - 招待承認（認証必要）
+- POST /invitations/:token/reject - 招待拒否（認証必要）
+- DELETE /:projectId/invitations/:invitationId - 招待削除（editor以上）
 
 ### 管理 (/api/admin)
 - GET /users - ユーザー一覧取得
@@ -182,8 +202,19 @@ git_repositories: id, project_id, is_initialized, current_branch, last_commit_ha
 ### コアテーブル
 ```sql
 users: id, google_id, email, name, role, avatar_url
-projects: id, user_id, name, description, git_url  
+projects: id, user_id, name, description, git_url
 claude_sessions: id, user_id, project_id, session_data
+```
+
+### マルチユーザーコラボレーションスキーマ（NEW）
+```sql
+-- プロジェクトメンバーシップ
+project_members: id, project_id, user_id, role(owner/editor/viewer), joined_at, updated_at
+
+-- プロジェクト招待
+project_invitations: id, project_id, invited_email, invited_by, role(editor/viewer),
+                     token, status(pending/accepted/rejected/expired), expires_at,
+                     created_at, accepted_at
 ```
 
 ## 環境変数
@@ -228,6 +259,7 @@ cd client && npm test        # Jest テストの実行
 # データベーススキーマ適用
 mysql -u root -p webide < server/database/init.sql
 mysql -u root -p webide < server/database/file_system_schema.sql
+mysql -u root -p webide < server/database/multi_user_schema.sql
 
 # Docker環境でのデータベース初期化
 docker-compose exec db mysql -u root -ppassword webide < /docker-entrypoint-initdb.d/init.sql
@@ -281,8 +313,10 @@ Claude Code統合はWebSocketベースの`claudeSocket.js`で実装：
 
 ### 認証・認可パターン
 - `verifyToken` ミドルウェアで JWT 検証
-- プロジェクト所有者チェックを各APIで実行
+- `requireProjectAccess(role)` ミドルウェアでロールベースアクセス制御
+- ロール階層: owner (3) > editor (2) > viewer (1)
 - Google OAuth制限: `@gsuite.si.aoyama.ac.jp` ドメインのみ
+- プロジェクト作成時、オーナーは自動的に project_members に owner ロールで登録される
 
 ### エラー処理の実装
 - データベーススキーマエラー時は詳細メッセージ付きで500エラー

@@ -10,7 +10,8 @@ import {
   FiGitBranch,
   FiExternalLink,
   FiCode,
-  FiTerminal
+  FiTerminal,
+  FiUsers
 } from 'react-icons/fi';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -18,6 +19,7 @@ import FileTree from '../components/FileTree';
 import CodeEditor from '../components/CodeEditor';
 import ClaudeTerminal from '../components/ClaudeTerminal';
 import GitPanel from '../components/GitPanel';
+import ProjectSharingModal from '../components/ProjectSharingModal';
 import { useAuth } from '../contexts/AuthContext';
 
 const ReactGridLayout = WidthProvider(GridLayoutLib);
@@ -25,10 +27,10 @@ const ReactGridLayout = WidthProvider(GridLayoutLib);
 const PANEL_KEYS = ['fileTree', 'gitPanel', 'editor', 'terminal'];
 
 const defaultLayoutMap = {
-  fileTree: { i: 'fileTree', x: 0, y: 0, w: 3, h: 18, minW: 2, minH: 8 },
-  gitPanel: { i: 'gitPanel', x: 0, y: 18, w: 3, h: 10, minW: 2, minH: 6 },
-  editor: { i: 'editor', x: 3, y: 0, w: 6, h: 28, minW: 4, minH: 12 },
-  terminal: { i: 'terminal', x: 9, y: 0, w: 3, h: 28, minW: 3, minH: 8 }
+  fileTree: { i: 'fileTree', x: 0, y: 0, w: 2, h: 8, minW: 2, minH: 8 },
+  gitPanel: { i: 'gitPanel', x: 0, y: 8, w: 2, h: 8, minW: 2, minH: 6 },
+  editor: { i: 'editor', x: 2, y: 0, w: 4, h: 16, minW: 4, minH: 12 },
+  terminal: { i: 'terminal', x: 6, y: 0, w: 6, h: 16, minW: 3, minH: 8 }
 };
 
 const defaultVisibility = {
@@ -45,10 +47,12 @@ const panelDefinitions = {
   terminal: { label: 'ターミナル', icon: FiTerminal }
 };
 
-const defaultZIndexMap = PANEL_KEYS.reduce((acc, key, index) => {
-  acc[key] = index + 1;
-  return acc;
-}, {});
+const defaultZIndexMap = {
+  editor: 14,
+  fileTree: 17,
+  gitPanel: 18,
+  terminal: 15
+};
 
 const defaultHighestZIndex = Math.max(...Object.values(defaultZIndexMap));
 
@@ -521,6 +525,7 @@ const IDEPage = () => {
   const [layoutMap, setLayoutMap] = useState(() => coerceLayoutMap(defaultLayoutMap));
   const [panelZIndex, setPanelZIndex] = useState(() => ({ ...defaultZIndexMap }));
   const [layoutInitialized, setLayoutInitialized] = useState(false);
+  const [isSharingModalOpen, setIsSharingModalOpen] = useState(false);
 
   const zCounterRef = useRef(defaultHighestZIndex);
   const previousLayoutRef = useRef(null);
@@ -892,28 +897,51 @@ const IDEPage = () => {
       return;
     }
 
-    setPanelVisibility(prev => {
-      const currentlyVisible = Object.values(prev).filter(Boolean).length;
-      if (prev[panelKey] && currentlyVisible <= 1) {
-        return prev;
+    // 状態更新を分離して、同期的に判定を行う
+    setPanelVisibility(currentVisibility => {
+      const currentlyVisible = Object.values(currentVisibility).filter(Boolean).length;
+      const isCurrentlyVisible = currentVisibility[panelKey];
+
+      // 最後の1つのパネルは非表示にできない
+      if (isCurrentlyVisible && currentlyVisible <= 1) {
+        return currentVisibility;
       }
 
-      const next = { ...prev, [panelKey]: !prev[panelKey] };
-
-      if (!prev[panelKey]) {
+      if (!isCurrentlyVisible) {
+        // 非表示から表示に切り替える場合
         bringPanelToFront(panelKey);
+
+        setLayoutMap(layoutPrev => {
+          if (layoutPrev[panelKey]) {
+            return layoutPrev;
+          }
+          return { ...layoutPrev, [panelKey]: { ...defaultLayoutMap[panelKey] } };
+        });
+
+        return {
+          ...currentVisibility,
+          [panelKey]: true
+        };
       }
 
-      setLayoutMap(layoutPrev => {
-        if (layoutPrev[panelKey]) {
-          return layoutPrev;
-        }
-        return { ...layoutPrev, [panelKey]: { ...defaultLayoutMap[panelKey] } };
-      });
+      // すでに表示されている場合 - z-indexを同期的にチェック
+      const currentZ = panelZIndex[panelKey] ?? 0;
+      const allZValues = Object.values(panelZIndex);
+      const highestZ = allZValues.length ? Math.max(...allZValues) : 0;
 
-      return next;
+      if (currentZ >= highestZ) {
+        // 最前面の場合は非表示にする
+        return {
+          ...currentVisibility,
+          [panelKey]: false
+        };
+      } else {
+        // 最前面でない場合は最前面に持ってくる
+        bringPanelToFront(panelKey);
+        return currentVisibility;
+      }
     });
-  }, [bringPanelToFront]);
+  }, [bringPanelToFront, panelZIndex]);
 
   const handleFileSelect = async (file) => {
     if (file.type !== 'file') {
@@ -1074,8 +1102,21 @@ const IDEPage = () => {
             <FiExternalLink size={14} />
             プレビュー
           </Button>
+          <Button onClick={() => setIsSharingModalOpen(true)} disabled={!projectId}>
+            <FiUsers size={14} />
+            共有
+          </Button>
         </HeaderRight>
       </Header>
+
+      {projectId && (
+        <ProjectSharingModal
+          isOpen={isSharingModalOpen}
+          onClose={() => setIsSharingModalOpen(false)}
+          projectId={projectId}
+          currentUserRole={project?.userRole || project?.user_role || 'viewer'}
+        />
+      )}
 
       <MainContent>
         <LayoutContainer>

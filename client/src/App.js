@@ -29,13 +29,13 @@ function App() {
           path="/ide/:projectId" 
           element={user ? <IDEPage /> : <Navigate to="/login" replace />} 
         />
-        <Route 
-          path="/admin" 
-          element={user?.role === 'teacher' ? <AdminPage /> : <Navigate to="/" replace />} 
+        <Route
+          path="/admin"
+          element={user?.role === 'teacher' ? <AdminPage /> : <Navigate to="/" replace />}
         />
-        <Route 
-          path="*" 
-          element={<Navigate to="/" replace />} 
+        <Route
+          path="*"
+          element={<Navigate to="/" replace />}
         />
       </Routes>
     </Router>

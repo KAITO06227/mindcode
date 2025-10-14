@@ -1,5 +1,6 @@
 const express = require('express');
 const { verifyToken } = require('../middleware/auth');
+const { requireProjectAccess } = require('../middleware/projectAccess');
 const db = require('../database/connection');
 const GitManager = require('../utils/gitManager');
 const path = require('path');
@@ -98,23 +99,23 @@ async function syncDatabaseWithFilesystem(projectId, projectPath, userId) {
   return { fileCount, folderCount };
 }
 
-// POST /api/version-control/:projectId/init - Initialize Tripcode repository
-router.post('/:projectId/init', verifyToken, async (req, res) => {
+// POST /api/version-control/:projectId/init - Initialize Tripcode repository (requires editor role)
+router.post('/:projectId/init', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { userName, userEmail } = req.body;
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
@@ -155,22 +156,22 @@ router.post('/:projectId/init', verifyToken, async (req, res) => {
   }
 });
 
-// GET /api/version-control/:projectId/status - Get Tripcode status
-router.get('/:projectId/status', verifyToken, async (req, res) => {
+// GET /api/version-control/:projectId/status - Get Tripcode status (requires viewer role)
+router.get('/:projectId/status', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { projectId } = req.params;
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
@@ -200,8 +201,8 @@ router.get('/:projectId/status', verifyToken, async (req, res) => {
   }
 });
 
-// POST /api/version-control/:projectId/commit - Create commit
-router.post('/:projectId/commit', verifyToken, async (req, res) => {
+// POST /api/version-control/:projectId/commit - Create commit (requires editor role, viewer can also commit)
+router.post('/:projectId/commit', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { message, files = [] } = req.body; // files array is optional, commits all if empty
@@ -210,17 +211,17 @@ router.post('/:projectId/commit', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'Commit message is required' });
     }
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
@@ -298,23 +299,23 @@ router.post('/:projectId/commit', verifyToken, async (req, res) => {
   }
 });
 
-// GET /api/version-control/:projectId/history - Get commit history
-router.get('/:projectId/history', verifyToken, async (req, res) => {
+// GET /api/version-control/:projectId/history - Get commit history (requires viewer role)
+router.get('/:projectId/history', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { limit = 20 } = req.query;
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
@@ -368,19 +369,19 @@ router.get('/:projectId/history', verifyToken, async (req, res) => {
   }
 });
 
-// GET /api/version-control/:projectId/commit-prompts - Get stored prompts for commits
-router.get('/:projectId/commit-prompts', verifyToken, async (req, res) => {
+// GET /api/version-control/:projectId/commit-prompts - Get stored prompts for commits (requires viewer role)
+router.get('/:projectId/commit-prompts', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const hashesParam = req.query.hashes;
 
     const [projects] = await db.execute(
-      'SELECT id FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT id FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
     if (!hashesParam) {
@@ -408,8 +409,8 @@ router.get('/:projectId/commit-prompts', verifyToken, async (req, res) => {
   }
 });
 
-// GET /api/version-control/:projectId/diff - Get file diff
-router.get('/:projectId/diff', verifyToken, async (req, res) => {
+// GET /api/version-control/:projectId/diff - Get file diff (requires viewer role)
+router.get('/:projectId/diff', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { filePath, commitHash } = req.query;
@@ -418,17 +419,17 @@ router.get('/:projectId/diff', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'filePath query parameter is required' });
     }
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
@@ -453,29 +454,29 @@ router.get('/:projectId/diff', verifyToken, async (req, res) => {
   }
 });
 
-// GET /api/version-control/:projectId/file-at-commit - Get file content at specific commit
-router.get('/:projectId/file-at-commit', verifyToken, async (req, res) => {
+// GET /api/version-control/:projectId/file-at-commit - Get file content at specific commit (requires viewer role)
+router.get('/:projectId/file-at-commit', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { filePath, commitHash } = req.query;
 
     if (!filePath || !commitHash) {
-      return res.status(400).json({ 
-        message: 'filePath and commitHash query parameters are required' 
+      return res.status(400).json({
+        message: 'filePath and commitHash query parameters are required'
       });
     }
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
@@ -504,22 +505,22 @@ router.get('/:projectId/file-at-commit', verifyToken, async (req, res) => {
   }
 });
 
-// GET /api/version-control/:projectId/branches - Get branches
-router.get('/:projectId/branches', verifyToken, async (req, res) => {
+// GET /api/version-control/:projectId/branches - Get branches (requires viewer role)
+router.get('/:projectId/branches', verifyToken, requireProjectAccess('viewer'), async (req, res) => {
   try {
     const { projectId } = req.params;
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
@@ -540,8 +541,8 @@ router.get('/:projectId/branches', verifyToken, async (req, res) => {
   }
 });
 
-// POST /api/version-control/:projectId/checkout - Switch branch
-router.post('/:projectId/checkout', verifyToken, async (req, res) => {
+// POST /api/version-control/:projectId/checkout - Switch branch (requires editor role)
+router.post('/:projectId/checkout', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { branchName } = req.body;
@@ -550,17 +551,17 @@ router.post('/:projectId/checkout', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'branchName is required' });
     }
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 
@@ -589,8 +590,8 @@ router.post('/:projectId/checkout', verifyToken, async (req, res) => {
   }
 });
 
-// POST /api/version-control/:projectId/restore - Restore to specific commit
-router.post('/:projectId/restore', verifyToken, async (req, res) => {
+// POST /api/version-control/:projectId/restore - Restore to specific commit (requires editor role)
+router.post('/:projectId/restore', verifyToken, requireProjectAccess('editor'), async (req, res) => {
   try {
     const { projectId } = req.params;
     const { commitHash } = req.body;
@@ -599,17 +600,17 @@ router.post('/:projectId/restore', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'commitHash is required' });
     }
 
-    // Verify project ownership
+    // Get project info
     const [projects] = await db.execute(
-      'SELECT * FROM projects WHERE id = ? AND user_id = ?',
-      [projectId, req.user.id]
+      'SELECT * FROM projects WHERE id = ?',
+      [projectId]
     );
 
     if (projects.length === 0) {
-      return res.status(404).json({ message: 'Project not found or access denied' });
+      return res.status(404).json({ message: 'Project not found' });
     }
 
-    const projectPath = await resolveExistingProjectPath(req.user, projectId);
+    const projectPath = await resolveExistingProjectPath(req.user, projectId, db);
     await fs.mkdir(projectPath, { recursive: true });
     const gitManager = new GitManager(projectPath);
 

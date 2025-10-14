@@ -280,9 +280,13 @@ module.exports = (io) => {
 
     let projectRecord;
     try {
+      // Check if user is owner or member
       const [projects] = await db.execute(
-        'SELECT id FROM projects WHERE id = ? AND user_id = ?',
-        [projectId, userId]
+        `SELECT p.id FROM projects p
+         LEFT JOIN project_members pm ON p.id = pm.project_id
+         WHERE p.id = ? AND (p.user_id = ? OR pm.user_id = ?)
+         LIMIT 1`,
+        [projectId, userId, userId]
       );
       if (projects.length === 0) {
         socket.emit('claude_error', { message: 'Project not found or access denied' });
@@ -313,7 +317,8 @@ module.exports = (io) => {
     const homeDir = await ensureUserRoot({ id: userId, email: userInfo.email });
     const workspaceDir = await resolveExistingProjectPath(
       { id: userId, email: userInfo.email },
-      projectId
+      projectId,
+      db
     );
     await fs.mkdir(workspaceDir, { recursive: true });
 
