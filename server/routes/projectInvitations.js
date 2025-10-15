@@ -125,6 +125,36 @@ router.post('/:projectId/invitations', verifyToken, requireProjectAccess('editor
       [projectId, email, invitedBy, role || 'viewer', token, expiresAt]
     );
 
+    // プロジェクト情報と招待者情報を取得してリアルタイム通知を送信
+    const [projectInfo] = await db.execute(
+      'SELECT name, description FROM projects WHERE id = ?',
+      [projectId]
+    );
+
+    const [inviterInfo] = await db.execute(
+      'SELECT name, email FROM users WHERE id = ?',
+      [invitedBy]
+    );
+
+    // Socket.IO経由でリアルタイム通知を送信
+    if (req.app.get('io') && req.app.get('io').notifyInvitation) {
+      const invitationData = {
+        id: result.insertId,
+        project_id: projectId,
+        project_name: projectInfo[0]?.name,
+        project_description: projectInfo[0]?.description,
+        invited_email: email,
+        invited_by_name: inviterInfo[0]?.name,
+        invited_by_email: inviterInfo[0]?.email,
+        role: role || 'viewer',
+        token,
+        expires_at: expiresAt,
+        created_at: new Date()
+      };
+
+      req.app.get('io').notifyInvitation(email, invitationData);
+    }
+
     res.json({
       success: true,
       message: '招待を作成しました',

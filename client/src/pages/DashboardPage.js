@@ -3,13 +3,19 @@ import { useNavigate } from 'react-router-dom';
 import styled from 'styled-components';
 import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
+import io from 'socket.io-client';
 import { FiPlus, FiFolder, FiSettings, FiLogOut, FiGithub, FiTrash2, FiBell } from 'react-icons/fi';
 import CreateProjectModal from '../components/CreateProjectModal';
 import InvitationNotification from '../components/InvitationNotification';
+import ToastNotification from '../components/ToastNotification';
 
 const DashboardContainer = styled.div`
   min-height: 100vh;
+  height: 100vh;
   background-color: #1e1e1e;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 `;
 
 const Header = styled.header`
@@ -59,9 +65,12 @@ const Button = styled.button`
 `;
 
 const Main = styled.main`
+  flex: 1;
   padding: 2rem;
   max-width: 1200px;
   margin: 0 auto;
+  width: 100%;
+  overflow-y: auto;
 `;
 
 const WelcomeSection = styled.div`
@@ -212,11 +221,49 @@ const DashboardPage = () => {
   const [invitations, setInvitations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [toastInvitation, setToastInvitation] = useState(null);
 
   useEffect(() => {
     fetchProjects();
     fetchInvitations();
   }, []);
+
+  // Socket.IO接続でリアルタイム招待通知
+  useEffect(() => {
+    if (!user) return;
+
+    const socket = io((process.env.REACT_APP_API_ORIGIN || 'http://localhost:3001') + '/invitations', {
+      auth: {
+        token: localStorage.getItem('token')
+      }
+    });
+
+    socket.on('connect', () => {
+      console.log('Socket.IO connected for invitations');
+      // ユーザーIDをサーバーに登録
+      socket.emit('register:user', { userId: user.id, email: user.email });
+    });
+
+    socket.on('invitation:received', (invitation) => {
+      console.log('New invitation received:', invitation);
+      // トースト通知を表示
+      setToastInvitation(invitation);
+      // 招待一覧を更新
+      fetchInvitations();
+    });
+
+    socket.on('disconnect', () => {
+      console.log('Socket.IO disconnected');
+    });
+
+    socket.on('connect_error', (error) => {
+      console.error('Socket.IO connection error:', error);
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [user]);
 
   const fetchProjects = async () => {
     try {
@@ -300,6 +347,14 @@ const DashboardPage = () => {
 
   return (
     <DashboardContainer>
+      {toastInvitation && (
+        <ToastNotification
+          invitation={toastInvitation}
+          onClose={() => setToastInvitation(null)}
+          autoClose={5000}
+        />
+      )}
+
       <Header>
         <Logo>MindCode</Logo>
         <UserSection>
@@ -309,14 +364,14 @@ const DashboardPage = () => {
               ({user?.role})
             </span>
           </UserInfo>
-          
+
           {user?.role === 'teacher' && (
             <Button onClick={() => navigate('/admin')}>
               <FiSettings size={16} />
               管理
             </Button>
           )}
-          
+
           <Button onClick={logout}>
             <FiLogOut size={16} />
             ログアウト

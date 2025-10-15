@@ -24,9 +24,35 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ 
+const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+  limits: {
+    fileSize: 10 * 1024 * 1024,     // 10MB per file
+    files: 100,                     // Maximum 100 files per request
+    fieldSize: 1 * 1024 * 1024      // 1MB field size limit
+  },
+  fileFilter: (req, file, cb) => {
+    // システムファイルを事前にフィルタリング
+    const systemFiles = ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitkeep'];
+    if (systemFiles.includes(file.originalname)) {
+      return cb(null, false); // ファイルをスキップ（エラーにしない）
+    }
+
+    // 許可するファイルタイプ（拡張子ベース）
+    const allowedExtensions = /\.(jpg|jpeg|png|gif|bmp|svg|webp|pdf|txt|md|html|css|js|json|xml|yml|yaml|py|java|php|cpp|c|h|go|rs|ts|tsx|jsx|vue|sh|bat|sql|gitignore|env|lock)$/i;
+
+    if (allowedExtensions.test(file.originalname)) {
+      return cb(null, true);
+    }
+
+    // 拡張子なしのファイルも許可（README, Makefileなど）
+    if (!path.extname(file.originalname)) {
+      return cb(null, true);
+    }
+
+    // 上記以外は許可
+    cb(null, true);
+  }
 });
 
 /**
@@ -203,12 +229,13 @@ router.post('/:projectId/files', verifyToken, requireProjectAccess('editor'), as
 
     if (existingFiles.length > 0) {
       fileId = existingFiles[0].id;
+      // contentはNULLに設定（物理ファイルから読み込む）
       await db.execute(`
-        UPDATE project_files 
-        SET content = ?, file_size = ?, checksum = ?, 
+        UPDATE project_files
+        SET content = NULL, file_size = ?, checksum = ?,
             file_type = ?, is_binary = ?, updated_by = ?, updated_at = NOW()
         WHERE id = ?`,
-        [content, fileSize, checksum, fileType, isBinary, req.user.id, fileId]
+        [fileSize, checksum, fileType, isBinary, req.user.id, fileId]
       );
 
       const [versionResult] = await db.execute(
@@ -218,7 +245,7 @@ router.post('/:projectId/files', verifyToken, requireProjectAccess('editor'), as
       const nextVersion = (versionResult[0].max_version || 0) + 1;
 
       await db.execute(`
-        INSERT INTO file_versions 
+        INSERT INTO file_versions
         (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
         VALUES (?, ?, ?, ?, 'update', 'File updated via API', ?)`,
         [fileId, nextVersion, fileSize, checksum, req.user.id]
@@ -226,19 +253,20 @@ router.post('/:projectId/files', verifyToken, requireProjectAccess('editor'), as
 
       isUpdate = true;
     } else {
+      // contentはNULLに設定（物理ファイルから読み込む）
       const [result] = await db.execute(`
-        INSERT INTO project_files 
-        (project_id, file_path, file_name, content, file_type, file_size, 
-         permissions, checksum, is_binary, created_by, updated_by) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [projectId, relativeFilePath, fileName, content, fileType, fileSize, 
+        INSERT INTO project_files
+        (project_id, file_path, file_name, content, file_type, file_size,
+         permissions, checksum, is_binary, created_by, updated_by)
+        VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+        [projectId, relativeFilePath, fileName, fileType, fileSize,
          'rw-r--r--', checksum, isBinary, req.user.id, req.user.id]
       );
 
       fileId = result.insertId;
 
       await db.execute(`
-        INSERT INTO file_versions 
+        INSERT INTO file_versions
         (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
         VALUES (?, 1, ?, ?, 'create', 'File created via API', ?)`,
         [fileId, fileSize, checksum, req.user.id]
@@ -310,27 +338,49 @@ router.get('/:projectId/files/:fileId', verifyToken, requireProjectAccess('viewe
       [fileId]
     );
 
-    // If specific version requested, get content from Git
-    let content = file.content;
+    // contentはDBではなく物理ファイルから読み込む
+    let content = null;
+
+    // Get project owner info for file system path
+    const [projects] = await db.execute(
+      'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+      [projectId]
+    );
+
+    const projectOwner = { id: projects[0].user_id, email: projects[0].email };
+    const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
+    const physicalFilePath = path.join(projectPath, file.file_path);
+
+    // 特定バージョンが要求された場合、Gitから取得
     if (version && versions.length > 0) {
       const versionRecord = versions.find(v => v.version_number == version);
       if (versionRecord && versionRecord.git_commit_hash) {
         try {
-          // Get project owner info for file system path
-          const [projects] = await db.execute(
-            'SELECT p.user_id, u.email FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
-            [projectId]
-          );
-
-          const projectOwner = { id: projects[0].user_id, email: projects[0].email };
-          const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
           const gitManager = new GitManager(projectPath);
           const historicalContent = await gitManager.getFileAtCommit(file.file_path, versionRecord.git_commit_hash);
           if (historicalContent !== null) {
             content = historicalContent;
           }
         } catch (error) {
-          }
+          console.error('Failed to get file from Git:', error);
+        }
+      }
+    }
+
+    // バージョン指定なし、またはGitからの取得失敗時は物理ファイルから読み込む
+    if (content === null) {
+      try {
+        // バイナリファイルでない場合のみ読み込む
+        if (!file.is_binary) {
+          content = await fs.readFile(physicalFilePath, 'utf-8');
+        } else {
+          // バイナリファイルの場合はbase64エンコード
+          const buffer = await fs.readFile(physicalFilePath);
+          content = buffer.toString('base64');
+        }
+      } catch (readError) {
+        console.error(`Failed to read file ${physicalFilePath}:`, readError);
+        content = ''; // ファイル読み込み失敗時は空文字列
       }
     }
 
@@ -738,7 +788,18 @@ router.post('/:projectId/upload', verifyToken, requireProjectAccess('editor'), u
       const relativePath = Array.isArray(relativePaths) ? relativePaths[i] : relativePaths;
 
       try {
-        const content = await fs.readFile(file.path, 'utf-8').catch(() => '');
+        // システムファイルはMulterのfileFilterで既にフィルタ済み
+        // ただし念のため追加チェック
+        const systemFiles = ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitkeep'];
+        if (systemFiles.includes(file.originalname) || systemFiles.includes(file.filename)) {
+          console.log(`Skipping system file: ${file.originalname || file.filename}`);
+          try {
+            await fs.unlink(file.path);
+          } catch (unlinkError) {
+            // 削除失敗は無視
+          }
+          continue;
+        }
 
         // フォルダ構造を考慮したファイルパス
         let fullFilePath;
@@ -801,21 +862,66 @@ router.post('/:projectId/upload', verifyToken, requireProjectAccess('editor'), u
         // ファイルを物理的に正しい場所に移動
         const finalFilePath = path.join(projectPath, fullFilePath);
         await fs.mkdir(path.dirname(finalFilePath), { recursive: true });
-        await fs.rename(file.path, finalFilePath);
 
-        // Calculate metadata
-        const checksum = calculateChecksum(content);
+        // 一時ファイルが存在するか確認してから移動
+        try {
+          await fs.access(file.path);
+          await fs.rename(file.path, finalFilePath);
+        } catch (renameError) {
+          if (renameError.code === 'ENOENT') {
+            // 一時ファイルが既に存在しない場合はスキップ
+            console.log(`Temporary file already moved or deleted: ${file.path}`);
+            continue;
+          }
+          throw renameError;
+        }
+
+        // Calculate metadata (checksumは物理ファイルから計算)
+        const fileStats = await fs.stat(finalFilePath);
         const fileType = getFileType(file.filename);
-        const isBinary = isBinaryFile(content);
         const fileName = path.basename(fullFilePath);
 
-        // Save to database
+        // チェックサムを計算（ストリームベース、メモリ効率的）
+        let checksum = '';
+        let isBinary = false;
+        try {
+          const hash = crypto.createHash('sha256');
+          const stream = require('fs').createReadStream(finalFilePath);
+
+          // バイナリチェック用のバッファ
+          let firstChunk = null;
+
+          for await (const chunk of stream) {
+            hash.update(chunk);
+
+            // 最初のチャンクでバイナリチェック
+            if (!firstChunk) {
+              firstChunk = chunk;
+              // バイナリファイルの判定（最初の512バイト）
+              const checkLength = Math.min(512, chunk.length);
+              for (let i = 0; i < checkLength; i++) {
+                const byte = chunk[i];
+                if (byte === 0 || (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13)) {
+                  isBinary = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          checksum = hash.digest('hex');
+        } catch (checksumError) {
+          console.error(`Failed to calculate checksum for ${fullFilePath}:`, checksumError);
+          checksum = '';
+        }
+
+        // Save to database (contentはNULL)
         const [result] = await db.execute(`
           INSERT INTO project_files
           (project_id, file_path, file_name, content, file_type, file_size,
            checksum, is_binary, created_by, updated_by)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [projectId, fullFilePath, fileName, content, fileType, file.size,
+          VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+          [projectId, fullFilePath, fileName, fileType, fileStats.size,
            checksum, isBinary, req.user.id, req.user.id]
         );
 
@@ -826,7 +932,7 @@ router.post('/:projectId/upload', verifyToken, requireProjectAccess('editor'), u
           INSERT INTO file_versions
           (file_id, version_number, file_size, checksum, change_type, change_summary, created_by)
           VALUES (?, 1, ?, ?, 'create', 'File uploaded via API', ?)`,
-          [fileId, file.size, checksum, req.user.id]
+          [fileId, fileStats.size, checksum, req.user.id]
         );
 
         // Log access
@@ -835,14 +941,19 @@ router.post('/:projectId/upload', verifyToken, requireProjectAccess('editor'), u
         uploadedFiles.push({
           id: fileId,
           filename: fileName,
-          size: file.size,
+          size: fileStats.size,
           path: fullFilePath,
           checksum
         });
 
       } catch (fileError) {
-        console.error(`Error processing file ${file.filename}:`, fileError);
-        // Continue with other files
+        console.error(`Error processing file ${file.originalname || file.filename}:`, fileError);
+        // エラーを記録して次のファイルに進む
+        uploadedFiles.push({
+          filename: file.originalname || file.filename,
+          error: fileError.message,
+          success: false
+        });
       }
     }
 
@@ -854,9 +965,21 @@ router.post('/:projectId/upload', verifyToken, requireProjectAccess('editor'), u
       });
     }
 
+    // 成功・失敗を分類
+    const successfulFiles = uploadedFiles.filter(f => f.success !== false);
+    const failedFiles = uploadedFiles.filter(f => f.success === false);
+
     res.json({
-      files: uploadedFiles,
-      createdFolders: createdFolders.size
+      success: failedFiles.length === 0,
+      totalFiles: req.files.length,
+      successCount: successfulFiles.length,
+      failedCount: failedFiles.length,
+      files: successfulFiles,
+      errors: failedFiles,
+      createdFolders: createdFolders.size,
+      message: failedFiles.length === 0
+        ? `${successfulFiles.length}個のファイルを正常にアップロードしました`
+        : `${successfulFiles.length}個のファイルが成功、${failedFiles.length}個が失敗しました`
     });
 
   } catch (error) {
@@ -1005,9 +1128,10 @@ router.post('/:projectId/sync', verifyToken, requireProjectAccess('editor'), asy
         for (const entry of entries) {
           const fullPath = path.join(dirPath, entry.name);
           const relativeFilePath = relativePath ? path.join(relativePath, entry.name) : entry.name;
-          
-          // Skip hidden files and node_modules
-          if (entry.name.startsWith('.') || entry.name === 'node_modules') {
+
+          // Skip hidden files, system files, and node_modules
+          const systemFiles = ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitkeep'];
+          if (entry.name.startsWith('.') || entry.name === 'node_modules' || systemFiles.includes(entry.name)) {
             continue;
           }
           

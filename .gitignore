@@ -8,3 +8,4 @@ user_projects/
 *.log
 .DS_Store
 .claude/
+tmp_home/

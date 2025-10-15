@@ -86,18 +86,18 @@ const UploadTypeLabel = styled.span`
 `;
 
 const FileInputArea = styled.div`
-  border: 2px dashed #555555;
+  border: 2px dashed ${props => props.$isDragging ? '#007acc' : '#555555'};
   border-radius: 8px;
   padding: 2rem;
   text-align: center;
   margin-bottom: 1rem;
-  background-color: #1e1e1e;
+  background-color: ${props => props.$isDragging ? '#1a3a52' : '#1e1e1e'};
   cursor: pointer;
   transition: all 0.2s;
 
   &:hover {
     border-color: #007acc;
-    background-color: #252526;
+    background-color: ${props => props.$isDragging ? '#1a3a52' : '#252526'};
   }
 `;
 
@@ -121,9 +121,37 @@ const SelectedFileItem = styled.div`
   padding: 0.25rem 0.5rem;
   font-size: 0.875rem;
   border-bottom: 1px solid #333333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
 
   &:last-child {
     border-bottom: none;
+  }
+`;
+
+const FileName = styled.span`
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const RemoveFileButton = styled.button`
+  background: none;
+  border: none;
+  color: #888888;
+  cursor: pointer;
+  padding: 0.25rem;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  flex-shrink: 0;
+
+  &:hover {
+    background-color: #404040;
+    color: #ff6b6b;
   }
 `;
 
@@ -189,6 +217,7 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
 
@@ -257,9 +286,161 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
     setUploadProgress(0);
   };
 
+  const handleRemoveFile = (index) => {
+    setSelectedFiles(prevFiles => prevFiles.filter((_, i) => i !== index));
+  };
+
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // relatedTargetがnullの場合（モーダル外に出た場合）のみfalseにする
+    if (!e.currentTarget.contains(e.relatedTarget)) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    if (isUploading) return;
+
+    const items = Array.from(e.dataTransfer.items);
+    const droppedFiles = Array.from(e.dataTransfer.files);
+
+    console.log('=== ドロップイベント詳細 ===');
+    console.log('items数:', items.length);
+    console.log('files数:', droppedFiles.length);
+    console.log('droppedFiles:', droppedFiles);
+
+    const files = [];
+
+    // DataTransferItemListから全ファイルを収集
+    const processEntry = async (entry, path = '') => {
+      console.log('processEntry:', entry.name, 'isFile:', entry.isFile, 'isDirectory:', entry.isDirectory);
+
+      if (entry.isFile) {
+        return new Promise((resolve) => {
+          entry.file((file) => {
+            console.log('ファイル追加:', file.name);
+            // webkitRelativePathを設定してフォルダ構造を保持
+            Object.defineProperty(file, 'webkitRelativePath', {
+              value: path + file.name,
+              writable: false
+            });
+            files.push(file);
+            resolve();
+          });
+        });
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+
+        // readEntriesは一度に全てのエントリを返さない可能性があるため、繰り返し呼び出す
+        const readAllEntries = async () => {
+          const allEntries = [];
+          let entries;
+
+          do {
+            entries = await new Promise((resolve) => {
+              reader.readEntries(resolve);
+            });
+            console.log('readEntries結果:', entries.length, '個のエントリ');
+            allEntries.push(...entries);
+          } while (entries.length > 0);
+
+          return allEntries;
+        };
+
+        const entries = await readAllEntries();
+        console.log('ディレクトリ内の全エントリ数:', entries.length);
+        for (const childEntry of entries) {
+          await processEntry(childEntry, path + entry.name + '/');
+        }
+      }
+    };
+
+    try {
+      // itemsが存在する場合はFileSystem APIを試行
+      if (items.length > 0 && items[0].webkitGetAsEntry) {
+        console.log('FileSystem API使用');
+        const processedIndices = new Set();
+
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const entry = item.webkitGetAsEntry();
+          console.log(`entry[${i}]:`, entry);
+
+          if (entry) {
+            await processEntry(entry);
+            processedIndices.add(i);
+          }
+        }
+
+        // webkitGetAsEntryがnullを返したファイルはdataTransfer.filesから取得
+        console.log('処理できなかったファイルのインデックス数:', items.length - processedIndices.size);
+        for (let i = 0; i < droppedFiles.length; i++) {
+          if (!processedIndices.has(i)) {
+            console.log('フォールバックで追加:', droppedFiles[i].name);
+            files.push(droppedFiles[i]);
+          }
+        }
+      } else {
+        // フォールバック: 通常のFileオブジェクトとして処理
+        console.log('フォールバック: dataTransfer.files使用');
+        files.push(...droppedFiles);
+      }
+
+      console.log('最終的なfiles配列の長さ:', files.length);
+      console.log('files配列:', files);
+
+      // ファイルタイプで、かつフォルダがドロップされた場合は警告
+      if (uploadType === 'file' && files.some(f => f.webkitRelativePath && f.webkitRelativePath.includes('/'))) {
+        alert('フォルダをアップロードするには、「フォルダ」タブを選択してください');
+        return;
+      }
+
+      if (files.length > 0) {
+        // 既存のファイルに追加（重複チェック）
+        setSelectedFiles(prevFiles => {
+          const existingPaths = new Set(
+            prevFiles.map(f => f.webkitRelativePath || f.name)
+          );
+          const newFiles = files.filter(
+            f => !existingPaths.has(f.webkitRelativePath || f.name)
+          );
+          console.log('既存ファイル数:', prevFiles.length);
+          console.log('新規ファイル数:', newFiles.length);
+          console.log('重複除外後の追加ファイル数:', newFiles.length);
+          return [...prevFiles, ...newFiles];
+        });
+      }
+    } catch (error) {
+      console.error('ドロップ処理エラー:', error);
+      alert('ファイルの読み込みに失敗しました');
+    }
+  };
+
   const modalContent = (
     <ModalOverlay onClick={handleClose}>
-      <ModalContent onClick={(e) => e.stopPropagation()}>
+      <ModalContent
+        onClick={(e) => e.stopPropagation()}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
         <ModalHeader>
           <ModalTitle>ファイルアップロード</ModalTitle>
           <CloseButton onClick={handleClose}>
@@ -286,12 +467,19 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
           </UploadTypeButton>
         </UploadTypeContainer>
 
-        <FileInputArea onClick={handleUploadAreaClick}>
+        <FileInputArea
+          onClick={handleUploadAreaClick}
+          $isDragging={isDragging}
+        >
           <FiUpload size={48} color="#007acc" />
           <FileInputText>
-            {uploadType === 'file'
-              ? 'クリックしてファイルを選択'
-              : 'クリックしてフォルダを選択'}
+            {isDragging
+              ? uploadType === 'file'
+                ? 'ファイルをドロップしてください'
+                : 'フォルダをドロップしてください'
+              : uploadType === 'file'
+              ? 'クリックまたはドラッグ&ドロップでファイルを選択'
+              : 'クリックまたはドラッグ&ドロップでフォルダを選択'}
           </FileInputText>
           <FileInputText style={{ fontSize: '0.75rem', color: '#999999' }}>
             {uploadType === 'file'
@@ -302,16 +490,20 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
 
         {selectedFiles.length > 0 && (
           <SelectedFilesContainer>
-            {selectedFiles.slice(0, 10).map((file, index) => (
+            {selectedFiles.map((file, index) => (
               <SelectedFileItem key={index}>
-                {file.webkitRelativePath || file.name}
+                <FileName title={file.webkitRelativePath || file.name}>
+                  {file.webkitRelativePath || file.name}
+                </FileName>
+                <RemoveFileButton
+                  onClick={() => handleRemoveFile(index)}
+                  disabled={isUploading}
+                  title="削除"
+                >
+                  <FiX size={16} />
+                </RemoveFileButton>
               </SelectedFileItem>
             ))}
-            {selectedFiles.length > 10 && (
-              <SelectedFileItem style={{ color: '#999999', fontStyle: 'italic' }}>
-                ...他 {selectedFiles.length - 10} 件
-              </SelectedFileItem>
-            )}
           </SelectedFilesContainer>
         )}
 

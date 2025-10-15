@@ -63,6 +63,13 @@ const claudeSocket = require('./sockets/claudeSocketSimple');
 claudeSocket(io);
 initFileTreeEvents(io);
 
+// Initialize Socket.IO for invitation notifications
+const invitationSocket = require('./sockets/invitationSocket');
+invitationSocket(io);
+
+// Make io accessible in routes
+app.set('io', io);
+
 // Serve React app for all other routes (only in production)
 if (process.env.NODE_ENV === 'production') {
   app.get('*', (req, res) => {
