@@ -391,6 +391,12 @@ async function setupClaudeLogMonitor({
     lastPromptText: null, // Track last prompt to avoid duplicates
     lastPromptTimestamp: null, // Track when the last prompt was detected
     sessionStartTime: Date.now() // Session start time
+  ,
+    debugRoot: path.join(homeDir, '.config', 'claude', 'debug'),
+    debugFilePath: null,
+    debugFileHandle: null,
+    debugFileOffset: 0,
+    debugBuffer: ''
   };
 
   async function closeFileHandle() {
@@ -402,6 +408,151 @@ async function setupClaudeLogMonitor({
       } finally {
         monitor.fileHandle = null;
       }
+    }
+  }
+
+  async function closeDebugLog() {
+    if (monitor.debugFileHandle) {
+      try {
+        await monitor.debugFileHandle.close();
+      } catch {
+        // ignore close errors
+      }
+    }
+    monitor.debugFileHandle = null;
+    monitor.debugFilePath = null;
+    monitor.debugFileOffset = 0;
+    monitor.debugBuffer = '';
+  }
+
+  async function ensureDebugLog() {
+    if (!monitor.activeSessionId) {
+      await closeDebugLog();
+      return false;
+    }
+
+    const expectedPath = path.join(monitor.debugRoot, `${monitor.activeSessionId}.txt`);
+    if (monitor.debugFilePath === expectedPath && monitor.debugFileHandle) {
+      return true;
+    }
+
+    await closeDebugLog();
+
+    try {
+      const fileHandle = await fs.open(expectedPath, 'r');
+      monitor.debugFileHandle = fileHandle;
+      monitor.debugFilePath = expectedPath;
+      try {
+        const stats = await fs.stat(expectedPath);
+        monitor.debugFileOffset = stats.size;
+      } catch {
+        monitor.debugFileOffset = 0;
+      }
+      monitor.debugBuffer = '';
+      return true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        console.error('[Claude Monitor] Failed to open debug log:', error);
+      }
+      monitor.debugFileHandle = null;
+      monitor.debugFilePath = null;
+      monitor.debugFileOffset = 0;
+      monitor.debugBuffer = '';
+      return false;
+    }
+  }
+
+  function finalizePromptLogsFromDebug() {
+    let finalized = false;
+    for (const promptLog of monitor.promptLogs.values()) {
+      if (promptLog.completed) {
+        continue;
+      }
+      if (!promptLog.latestTextEntry && promptLog.status !== 'text_ready') {
+        continue;
+      }
+      if (promptLog.status !== 'completed_by_debug_stop') {
+        promptLog.status = 'completed_by_debug_stop';
+      }
+      finalizePromptLog(promptLog);
+      finalized = true;
+    }
+    return finalized;
+  }
+
+  function processDebugLine(line) {
+    if (!line) {
+      return;
+    }
+    if (line.includes('SubagentStop')) {
+      return;
+    }
+
+    const isStopHook = line.includes('Getting matching hook commands for Stop') ||
+                        line.includes('Executing hooks for Stop');
+
+    if (!isStopHook) {
+      return;
+    }
+
+    const finalized = finalizePromptLogsFromDebug();
+    if (!finalized) {
+      console.log('[Claude Monitor] Stop hook detected but no pending prompt to finalize');
+    }
+  }
+
+  async function pollDebugLog() {
+    if (!monitor.activeSessionId) {
+      await closeDebugLog();
+      return;
+    }
+
+    const ready = await ensureDebugLog();
+    if (!ready || !monitor.debugFilePath || !monitor.debugFileHandle) {
+      return;
+    }
+
+    let stats;
+    try {
+      stats = await fs.stat(monitor.debugFilePath);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        await closeDebugLog();
+        return;
+      }
+      console.error('[Claude Monitor] Failed to stat debug log:', error);
+      return;
+    }
+
+    if (!stats || stats.size <= monitor.debugFileOffset) {
+      return;
+    }
+
+    const chunkSize = stats.size - monitor.debugFileOffset;
+    const buffer = Buffer.allocUnsafe(chunkSize);
+    let bytesRead = 0;
+    try {
+      const result = await monitor.debugFileHandle.read(buffer, 0, chunkSize, monitor.debugFileOffset);
+      bytesRead = result.bytesRead;
+    } catch (error) {
+      console.error('[Claude Monitor] Failed to read debug log:', error);
+      return;
+    }
+
+    if (bytesRead <= 0) {
+      return;
+    }
+
+    monitor.debugFileOffset += bytesRead;
+    monitor.debugBuffer += buffer.slice(0, bytesRead).toString('utf8');
+
+    let newlineIndex = monitor.debugBuffer.indexOf('\n');
+    while (newlineIndex !== -1) {
+      const rawLine = monitor.debugBuffer.slice(0, newlineIndex);
+      const line = rawLine.trim();
+      monitor.debugBuffer = monitor.debugBuffer.slice(newlineIndex + 1);
+      processDebugLine(line);
+      newlineIndex = monitor.debugBuffer.indexOf('\n');
     }
   }
 
@@ -459,6 +610,17 @@ async function setupClaudeLogMonitor({
     }
 
     return latestPath;
+  }
+
+  function deriveSessionIdFromFile(pathname) {
+    if (!pathname) {
+      return null;
+    }
+    const base = path.basename(pathname, '.jsonl');
+    if (!base || base.length < 30) {
+      return null;
+    }
+    return base;
   }
 
   function linkPromptState(promptLog) {
@@ -670,15 +832,6 @@ async function setupClaudeLogMonitor({
     const isToolResultEvent = isUserRole && entryContainsToolResult(entry);
 
     if (isUserRole && !isToolResultEvent) {
-      // Before creating a new prompt log, finalize any previous incomplete prompts
-      for (const [existingUuid, existingPromptLog] of monitor.promptLogs.entries()) {
-        if (!existingPromptLog.completed && existingPromptLog.uuid !== entry.uuid) {
-          console.log(`[Claude Monitor] New user prompt detected in timeline, finalizing previous prompt: ${existingUuid}`);
-          existingPromptLog.status = 'completed_by_next_prompt';
-          finalizePromptLog(existingPromptLog);
-        }
-      }
-
       const promptLog = getOrCreatePromptLog(entry.uuid, entry);
       if (promptLog) {
         promptLog.entries.push(entry);
@@ -829,7 +982,12 @@ async function setupClaudeLogMonitor({
     }
     console.log(`[Claude Monitor] Opening timeline log file: ${latestPath}`);
     await closeFileHandle();
+    await closeDebugLog();
     monitor.currentFilePath = latestPath;
+    const derivedId = deriveSessionIdFromFile(latestPath);
+    if (derivedId) {
+      monitor.activeSessionId = derivedId;
+    }
     monitor.entryIndex.clear();
     for (const promptLog of monitor.promptLogs.values()) {
       clearPromptDebounce(promptLog);
@@ -845,6 +1003,7 @@ async function setupClaudeLogMonitor({
     try {
       monitor.fileHandle = await fs.open(latestPath, 'r');
       console.log(`[Claude Monitor] Successfully opened timeline log file`);
+      await ensureDebugLog();
     } catch (openError) {
       console.error('[Claude Monitor] Failed to open Claude timeline log:', openError);
       monitor.currentFilePath = null;
@@ -862,6 +1021,8 @@ async function setupClaudeLogMonitor({
 
     // If no timeline file is open yet, we're done for this poll
     if (!monitor.currentFilePath) {
+      await ensureDebugLog();
+      await pollDebugLog();
       return;
     }
 
@@ -874,11 +1035,15 @@ async function setupClaudeLogMonitor({
       monitor.currentFilePath = null;
       monitor.fileOffset = 0;
       monitor.buffer = '';
+      await ensureDebugLog();
+      await pollDebugLog();
       return;
     }
 
     if (!stats || stats.size === monitor.fileOffset) {
       // No new data to read
+      await ensureDebugLog();
+      await pollDebugLog();
       return;
     }
 
@@ -894,6 +1059,8 @@ async function setupClaudeLogMonitor({
         monitor.currentFilePath = null;
         monitor.fileOffset = 0;
         monitor.buffer = '';
+        await ensureDebugLog();
+        await pollDebugLog();
         return;
       }
     }
@@ -910,6 +1077,8 @@ async function setupClaudeLogMonitor({
 
     if (bytesRead <= 0) {
       console.log('[Claude Monitor] No bytes read, returning');
+      await ensureDebugLog();
+      await pollDebugLog();
       return;
     }
 
@@ -937,6 +1106,9 @@ async function setupClaudeLogMonitor({
     if (lineCount > 0) {
       console.log(`[Claude Monitor] Processed ${lineCount} log entries`);
     }
+
+    await ensureDebugLog();
+    await pollDebugLog();
   }
 
   monitor.dispose = async () => {
@@ -962,6 +1134,7 @@ async function setupClaudeLogMonitor({
 
     monitor.promptLogs.clear();
     monitor.entryIndex.clear();
+    await closeDebugLog();
     await closeFileHandle();
   };
 
@@ -1400,6 +1573,13 @@ async function setupCodexLogMonitor({
     }
 
     if (monitor.currentFilePath === latestPath && monitor.fileHandle) {
+      if (!monitor.activeSessionId) {
+        const derivedId = deriveSessionIdFromFile(latestPath);
+        if (derivedId) {
+          monitor.activeSessionId = derivedId;
+        }
+      }
+      await ensureDebugLog();
       return true;
     }
 
@@ -1407,7 +1587,8 @@ async function setupCodexLogMonitor({
     monitor.currentFilePath = latestPath;
     monitor.fileOffset = 0;
     monitor.buffer = '';
-    monitor.activeSessionId = null;
+    const derivedId = deriveSessionIdFromFile(latestPath);
+    monitor.activeSessionId = derivedId || null;
     monitor.lastActivityTs = Date.now();
     expireStalePrompts('session-switch');
     monitor.promptQueue.length = 0;
@@ -1415,6 +1596,7 @@ async function setupCodexLogMonitor({
 
     try {
       monitor.fileHandle = await fs.open(latestPath, 'r');
+      await ensureDebugLog();
       return true;
     } catch (openError) {
       console.error('Failed to open Codex session log:', openError);
@@ -1437,6 +1619,7 @@ async function setupCodexLogMonitor({
       monitor.activeSessionId = null;
       monitor.lastUserMessage = null;
       closeFileHandle().catch(() => {});
+      closeDebugLog().catch(() => {});
       expireStalePrompts('session-switch');
       return;
     }
