@@ -13,6 +13,95 @@ const {
 } = require('../utils/userWorkspace');
 const router = express.Router();
 
+const INITIAL_TEMPLATE_DIR = path.resolve(__dirname, '../../initial_project');
+const TEMPLATE_PLACEHOLDER = '{{PROJECT_NAME}}';
+const TEMPLATE_SKIP_ENTRIES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
+const PLACEHOLDER_EXTENSIONS = new Set([
+  '.html',
+  '.htm',
+  '.js',
+  '.ts',
+  '.tsx',
+  '.jsx',
+  '.css',
+  '.scss',
+  '.md',
+  '.txt',
+  '.json',
+  '.yml',
+  '.yaml'
+]);
+
+async function copyDirectoryRecursive(source, destination) {
+  const entries = await fs.readdir(source, { withFileTypes: true });
+  await fs.mkdir(destination, { recursive: true });
+
+  for (const entry of entries) {
+    if (TEMPLATE_SKIP_ENTRIES.has(entry.name)) {
+      continue;
+    }
+
+    const sourcePath = path.join(source, entry.name);
+    const destinationPath = path.join(destination, entry.name);
+
+    if (entry.isDirectory()) {
+      await copyDirectoryRecursive(sourcePath, destinationPath);
+    } else if (entry.isFile()) {
+      await fs.copyFile(sourcePath, destinationPath);
+    }
+  }
+}
+
+async function applyProjectNamePlaceholders(directory, projectName) {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+
+    if (entry.isDirectory()) {
+      await applyProjectNamePlaceholders(entryPath, projectName);
+      continue;
+    }
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!PLACEHOLDER_EXTENSIONS.has(ext)) {
+      continue;
+    }
+
+    try {
+      const content = await fs.readFile(entryPath, 'utf8');
+      if (!content.includes(TEMPLATE_PLACEHOLDER)) {
+        continue;
+      }
+      const updatedContent = content.replace(new RegExp(TEMPLATE_PLACEHOLDER, 'g'), projectName);
+      if (updatedContent !== content) {
+        await fs.writeFile(entryPath, updatedContent);
+      }
+    } catch (error) {
+      console.warn(`Failed to apply project name placeholder for ${entryPath}:`, error);
+    }
+  }
+}
+
+async function applyInitialProjectTemplate(projectPath, projectName) {
+  try {
+    const stats = await fs.stat(INITIAL_TEMPLATE_DIR);
+    if (!stats.isDirectory()) {
+      return false;
+    }
+  } catch (error) {
+    return false;
+  }
+
+  await copyDirectoryRecursive(INITIAL_TEMPLATE_DIR, projectPath);
+  await applyProjectNamePlaceholders(projectPath, projectName);
+  return true;
+}
+
 // Get user projects (including projects where user is a member)
 router.get('/', verifyToken, async (req, res) => {
   try {
@@ -58,96 +147,10 @@ router.post('/', verifyToken, async (req, res) => {
     // Create project directory structure
     const projectPath = await ensureProjectPath(req.user, projectId);
 
-    // Create initial files
-    const indexHtml = `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${name}</title>
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
-    <h1>Welcome to ${name}</h1>
-    <script src="script.js"></script>
-</body>
-</html>`;
-
-    const indexCss = `body {
-    font-family: Arial, sans-serif;
-    margin: 0;
-    padding: 20px;
-    background-color: #f0f0f0;
-}
-
-h1 {
-    color: #333;
-    text-align: center;
-}`;
-
-    const indexJs = `// Customize your project "${name}" here\n`;
-
-    const aiSharedGuide = [
-      '# MindCode AI 協調ガイド',
-      '',
-      'このファイルは複数の AI エージェントが共通で参照する指示書です。',
-      '',
-      '## 共通原則',
-      '- 作業開始前に現在の課題と目的を整理し、必要であればここにメモを残すこと',
-      '- 変更内容は簡潔に記録し、他のエージェントが状況を把握できるようにすること',
-      '- 競合する提案がある場合は、優先度と根拠を明示して調整案を提示すること',
-      '',
-      '## 実装手順の共有',
-      '- ファイル構成や重要な設定が変わる場合は、このファイルに追記して共有してください',
-      '- 追加の指示や注意事項があれば、箇条書きで分かりやすくまとめてください',
-      '',
-      '## レビューと検証',
-      '- 可能であれば、テスト手順や確認方法を記載し、他のエージェントも同じ手順を再利用できるようにしてください',
-      '- 完了報告の際は、何を実施し、未完了のタスクがあるかどうかを明示してください'
-    ].join('\n');
-
-    const buildAgentPrompt = (agentLabel) => [
-      `# ${agentLabel} Agent ワークフロー`,
-      '',
-      'プロジェクトルートの `AI.md` を読み込み、共通指示を反映しながら対応してください。',
-      '',
-      '## 行動ガイドライン',
-      '- `AI.md` に記載された原則を優先して判断すること',
-      '- 作業内容や決定事項があれば `AI.md` へ追記し、他エージェントと共有すること',
-      '- 必要に応じて補助的なメモや TODO を `AI.md` に残してください'
-    ].join('\n');
-
-    const hiddenAgentFiles = [
-      { filePath: '.mindcode/CLAUDE.md', content: buildAgentPrompt('Claude'), type: 'markdown', isHidden: true },
-      { filePath: '.mindcode/AGENTS.md', content: buildAgentPrompt('Agents'), type: 'markdown', isHidden: true },
-      { filePath: '.mindcode/GEMINI.md', content: buildAgentPrompt('Gemini'), type: 'markdown', isHidden: true }
-    ];
-
-    const gitignore = ['node_modules/', '.env', '.config/', '.backup/', '.mindcode/', '.codex/', '.gemini/'].join('\n');
-
-    const filesToCreate = [
-      { filePath: 'index.html', content: indexHtml, type: 'html' },
-      { filePath: 'style.css', content: indexCss, type: 'css' },
-      { filePath: 'script.js', content: indexJs, type: 'javascript' },
-      { filePath: 'AI.md', content: aiSharedGuide, type: 'markdown' },
-      ...hiddenAgentFiles,
-      { filePath: '.gitignore', content: gitignore, type: 'text', isHidden: true }
-    ];
-
-    // Write files to disk
     try {
-      await fs.mkdir(projectPath, { recursive: true });
-
-      for (const file of filesToCreate) {
-        const relativeDir = path.dirname(file.filePath);
-        if (relativeDir && relativeDir !== '.') {
-          await fs.mkdir(path.join(projectPath, relativeDir), { recursive: true });
-        }
-        await fs.writeFile(path.join(projectPath, file.filePath), file.content);
-      }
-    } catch (fileError) {
-      console.error('Error creating files:', fileError);
-      throw new Error(`Failed to create project files: ${fileError.message}`);
+      await applyInitialProjectTemplate(projectPath, name);
+    } catch (templateError) {
+      console.warn('初期テンプレートの適用に失敗しました:', templateError);
     }
 
     // データベースの既存ファイルレコードとバージョン履歴をクリア（プロジェクト再作成の場合）
