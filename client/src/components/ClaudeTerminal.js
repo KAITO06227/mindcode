@@ -25,8 +25,6 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
   const terminalInstanceRef = useRef(null);
   const fitAddonRef = useRef(null);
   const socketRef = useRef(null);
-  // Track command activity without retriggering effect
-  const cliCommandActiveRef = useRef(false);
   // Store callback ref to avoid effect re-trigger
   const onCommitNotificationRef = useRef(onCommitNotification);
 
@@ -100,10 +98,9 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
     
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
-    
+
     fitAddonRef.current = fitAddon;
     terminalInstanceRef.current = terminal;
-    cliCommandActiveRef.current = false;
 
     // Open terminal in DOM
     const runFit = (context = 'fit') => {
@@ -165,45 +162,47 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
       terminal.writeln('\r\n\x1b[31m接続が切断されました\x1b[0m\r\n');
     });
 
-    // Auto-sync filesystem after AI CLI commands
-    const autoSyncAfterCli = async () => {
-      try {
-        await axios.post(`/api/filesystem/${projectId}/sync`);
-        
-        // Trigger file tree refresh if available
-        if (window.refreshFileTree) {
-          window.refreshFileTree();
-        }
-      } catch (error) {
-      }
-    };
-
     // Handle terminal output
     socket.on('output', (data) => {
       terminal.write(data);
-      
-      const outputText = data.toString();
-
-      const promptDetected =
-        outputText.includes('$ ') || outputText.includes('> ') || outputText.includes('You:');
-
-      if (cliCommandActiveRef.current && promptDetected) {
-        cliCommandActiveRef.current = false;
-
-        // Auto-sync after a short delay to ensure command is fully completed
-        setTimeout(autoSyncAfterCli, 2000);
-      }
     });
 
+    // Auto-sync filesystem after AI operations complete
+    const autoSyncAfterAI = async () => {
+      console.log('[ClaudeTerminal] Starting filesystem sync for project:', projectId);
+      try {
+        const syncResponse = await axios.post(`/api/filesystem/${projectId}/sync`);
+        console.log('[ClaudeTerminal] Filesystem sync completed:', syncResponse.data);
+
+        // Trigger file tree refresh if available
+        if (window.refreshFileTree) {
+          console.log('[ClaudeTerminal] Triggering file tree refresh');
+          window.refreshFileTree();
+        } else {
+          console.warn('[ClaudeTerminal] window.refreshFileTree is not available');
+        }
+      } catch (error) {
+        console.error('[ClaudeTerminal] Failed to sync filesystem:', error);
+      }
+    };
+
     const handleCommitNotificationEvent = (payload) => {
+      console.log('[ClaudeTerminal] Received commit_notification:', payload);
+
       if (typeof onCommitNotificationRef.current === 'function') {
         onCommitNotificationRef.current(payload);
       }
+
+      // Auto-sync after commit notification (indicates AI operation completed)
+      console.log('[ClaudeTerminal] Triggering auto-sync after commit notification');
+      autoSyncAfterAI();
     };
 
     socket.on('commit_notification', handleCommitNotificationEvent);
 
     const handleSaveComplete = (payload) => {
+      console.log('[ClaudeTerminal] Received save_complete:', payload);
+
       if (typeof onCommitNotificationRef.current === 'function') {
         onCommitNotificationRef.current({
           status: 'success',
@@ -213,6 +212,10 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
           message: payload?.message || '保存が完了しました'
         });
       }
+
+      // Auto-sync after save complete
+      console.log('[ClaudeTerminal] Triggering auto-sync after save complete');
+      autoSyncAfterAI();
     };
 
     socket.on('save_complete', handleSaveComplete);
@@ -220,9 +223,6 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
     // Handle terminal input - send directly to server like ../claude
     terminal.onData((data) => {
       socket.emit('input', data);
-      if (data.includes('\r')) {
-        cliCommandActiveRef.current = true;
-      }
     });
 
     // Handle terminal resize - like ../claude

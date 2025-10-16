@@ -14,6 +14,2021 @@ const inputBuffers = {};
 const sessionState = {};
 const pendingPromptsByProject = {};
 const commitPromptStore = {};
+const claudeLogMonitors = {};
+const codexLogMonitors = {};
+const geminiLogMonitors = {};
+
+const LOG_POLL_INTERVAL_MS = 250;
+const CLAUDE_LOG_POLL_INTERVAL_MS = LOG_POLL_INTERVAL_MS;
+const CODEX_LOG_POLL_INTERVAL_MS = LOG_POLL_INTERVAL_MS;
+const GEMINI_LOG_POLL_INTERVAL_MS = LOG_POLL_INTERVAL_MS;
+
+// Gemini hash folder mapping helpers
+async function saveGeminiHashFolder(projectId, hashFolder, database) {
+  try {
+    await database.execute(
+      `INSERT INTO gemini_project_folders (project_id, hash_folder)
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE hash_folder = ?, updated_at = CURRENT_TIMESTAMP`,
+      [projectId, hashFolder, hashFolder]
+    );
+    console.log(`[Gemini] Saved hash folder mapping: ${projectId} -> ${hashFolder}`);
+  } catch (error) {
+    console.error('[Gemini] Failed to save hash folder mapping:', error);
+    throw error;
+  }
+}
+
+async function getGeminiHashFolder(projectId, database) {
+  try {
+    const [rows] = await database.execute(
+      'SELECT hash_folder FROM gemini_project_folders WHERE project_id = ?',
+      [projectId]
+    );
+    if (rows.length > 0) {
+      console.log(`[Gemini] Retrieved hash folder mapping: ${projectId} -> ${rows[0].hash_folder}`);
+      return rows[0].hash_folder;
+    }
+    return null;
+  } catch (error) {
+    console.error('[Gemini] Failed to get hash folder mapping:', error);
+    return null;
+  }
+}
+const DEFAULT_CLAUDE_TEXT_DEBOUNCE_MS = (() => {
+  const parsed = Number.parseInt(process.env.CLAUDE_TEXT_DEBOUNCE_MS ?? '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 800;
+})();
+const DEFAULT_CODEX_TEXT_DEBOUNCE_MS = (() => {
+  const parsed = Number.parseInt(process.env.CODEX_TEXT_DEBOUNCE_MS ?? '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 800;
+})();
+const DEFAULT_GEMINI_TURN_IDLE_MS = (() => {
+  const fromMs = Number.parseInt(process.env.GEMINI_TURN_IDLE_MS ?? '', 10);
+  if (Number.isFinite(fromMs) && fromMs >= 0) {
+    return fromMs;
+  }
+  const fromS = Number.parseFloat(process.env.GEMINI_TURN_IDLE_S ?? '');
+  if (Number.isFinite(fromS) && fromS >= 0) {
+    return Math.round(fromS * 1000);
+  }
+  return 800;
+})();
+const DEFAULT_GEMINI_SESSION_IDLE_MS = (() => {
+  const fromMs = Number.parseInt(process.env.GEMINI_SESSION_IDLE_MS ?? '', 10);
+  if (Number.isFinite(fromMs) && fromMs >= 0) {
+    return fromMs;
+  }
+  const fromS = Number.parseFloat(process.env.GEMINI_SESSION_IDLE_S ?? '');
+  if (Number.isFinite(fromS) && fromS >= 0) {
+    return Math.round(fromS * 1000);
+  }
+  return 5000;
+})();
+
+function parseDurationPreference({ ms, s, defaultValue }) {
+  const msValue = ms !== undefined ? Number.parseFloat(ms) : undefined;
+  if (Number.isFinite(msValue) && msValue >= 0) {
+    return msValue;
+  }
+  const sValue = s !== undefined ? Number.parseFloat(s) : undefined;
+  if (Number.isFinite(sValue) && sValue >= 0) {
+    return sValue * 1000;
+  }
+  return defaultValue;
+}
+
+function slugifyForClaudeProjects(inputPath) {
+  if (!inputPath || typeof inputPath !== 'string') {
+    return null;
+  }
+  const normalized = inputPath
+    .replace(/\\/g, '/')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '-')
+    .replace(/-+/g, '-');
+  return normalized.startsWith('-') ? normalized : `-${normalized}`;
+}
+
+function generateClaudeProjectSlugCandidates(homeDir, workspaceDir) {
+  const candidates = [];
+  const normalizedWorkspace = (workspaceDir || '').replace(/\\/g, '/');
+  const directSlug = slugifyForClaudeProjects(normalizedWorkspace);
+  if (directSlug) {
+    candidates.push(directSlug);
+  }
+
+  if (homeDir && workspaceDir) {
+    const normalizedHome = homeDir.replace(/\\/g, '/');
+    const emailSegment = path.basename(normalizedHome);
+    const relative = path.relative(normalizedHome, workspaceDir);
+    if (relative && !relative.startsWith('..')) {
+      const posixRelative = relative.split(path.sep).join('/');
+      const containerPath = `/app/user_projects/${emailSegment}/${posixRelative}`;
+      const containerSlug = slugifyForClaudeProjects(containerPath);
+      if (containerSlug && !candidates.includes(containerSlug)) {
+        candidates.push(containerSlug);
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function parseTimestamp(value) {
+  if (!value) {
+    return Date.now();
+  }
+  if (typeof value === 'number') {
+    return value;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? Date.now() : parsed;
+}
+
+function getRootUserUuid(entry, entryIndex) {
+  if (!entry) {
+    return null;
+  }
+  if (entry.type === 'user' && entry.message?.role === 'user') {
+    return entry.uuid || null;
+  }
+
+  let currentUuid = entry.parentUuid;
+  let guard = 0;
+
+  while (currentUuid && guard < 50) {
+    const parent = entryIndex.get(currentUuid);
+    if (!parent) {
+      return null;
+    }
+    if (parent.type === 'user' && parent.message?.role === 'user') {
+      return parent.uuid || null;
+    }
+    currentUuid = parent.parentUuid;
+    guard += 1;
+  }
+
+  return null;
+}
+
+function entryHasToolUse(entry) {
+  const content = entry?.message?.content;
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  return content.some((part) => part?.type === 'tool_use');
+}
+
+function entryContainsToolResult(entry) {
+  const content = entry?.message?.content;
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  return content.some((part) => part?.type === 'tool_result');
+}
+
+function pushTextCandidate(target, value) {
+  if (!value) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => pushTextCandidate(target, item));
+    return;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      target.push(trimmed);
+    }
+  }
+}
+
+function extractAssistantText(entry) {
+  const texts = [];
+  const message = entry?.message || {};
+  const content = message.content;
+
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      if (!part) {
+        continue;
+      }
+      if (part.type === 'text') {
+        pushTextCandidate(texts, part.text);
+      } else if (part.type === 'output_text') {
+        pushTextCandidate(texts, part.text ?? part.value);
+      } else if (typeof part.value === 'string') {
+        pushTextCandidate(texts, part.value);
+      } else if (typeof part.text === 'string') {
+        pushTextCandidate(texts, part.text);
+      }
+    }
+  }
+
+  pushTextCandidate(texts, message.text);
+  pushTextCandidate(texts, entry?.output_text);
+  pushTextCandidate(texts, entry?.content);
+  pushTextCandidate(texts, message?.result);
+
+  if (texts.length === 0) {
+    return null;
+  }
+
+  return texts.join('\n').trim();
+}
+
+function getStopReason(entry) {
+  const candidates = [
+    entry?.stop_reason,
+    entry?.stopReason,
+    entry?.stop_sequence,
+    entry?.stopSequence,
+    entry?.message?.stop_reason,
+    entry?.message?.stopReason,
+    entry?.message?.stop_sequence,
+    entry?.message?.stopSequence
+  ];
+
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.length > 0) {
+      return value.toLowerCase();
+    }
+  }
+
+  return null;
+}
+
+async function setupClaudeLogMonitor({
+  homeDir,
+  workspaceDir,
+  sessionKey,
+  finalizeSession,
+  socket,
+  debounceMs
+}) {
+  console.log(`[Claude Monitor Setup] homeDir: ${homeDir}`);
+  console.log(`[Claude Monitor Setup] workspaceDir: ${workspaceDir}`);
+
+  // Monitor Claude CLI history.jsonl for prompt detection
+  const historyFilePath = path.join(homeDir, '.config', 'claude', 'history.jsonl');
+  console.log(`[Claude Monitor Setup] Will monitor history file: ${historyFilePath}`);
+
+  // Prepare timeline log directory for response monitoring
+  const slugCandidates = generateClaudeProjectSlugCandidates(homeDir, workspaceDir);
+  console.log(`[Claude Monitor Setup] slugCandidates:`, slugCandidates);
+
+  if (!slugCandidates || slugCandidates.length === 0) {
+    console.error('[Claude Monitor Setup] No slug candidates generated');
+    return null;
+  }
+
+  const claudeProjectsRoot = path.join(
+    homeDir,
+    '.config',
+    'claude',
+    'projects'
+  );
+  console.log(`[Claude Monitor Setup] claudeProjectsRoot: ${claudeProjectsRoot}`);
+
+  try {
+    await fs.mkdir(claudeProjectsRoot, { recursive: true });
+  } catch (mkdirError) {
+    console.error('[Claude Monitor Setup] Failed to ensure Claude log directory:', mkdirError);
+    return null;
+  }
+
+  let projectSlug = slugCandidates[0];
+  let projectLogDir = path.join(claudeProjectsRoot, projectSlug);
+
+  for (const candidateSlug of slugCandidates) {
+    const candidateDir = path.join(claudeProjectsRoot, candidateSlug);
+    try {
+      await fs.access(candidateDir);
+      console.log(`[Claude Monitor Setup] Found existing directory: ${candidateDir}`);
+      projectSlug = candidateSlug;
+      projectLogDir = candidateDir;
+      break;
+    } catch {
+      // ignore missing directory; will create below if needed
+    }
+  }
+
+  console.log(`[Claude Monitor Setup] Final projectSlug: ${projectSlug}`);
+  console.log(`[Claude Monitor Setup] Final projectLogDir: ${projectLogDir}`);
+
+  try {
+    await fs.mkdir(projectLogDir, { recursive: true });
+  } catch (mkdirError) {
+    console.error('[Claude Monitor Setup] Failed to ensure Claude project log directory:', mkdirError);
+    return null;
+  }
+
+  // Initialize history file offset to current file size to skip old prompts
+  let initialHistoryOffset = 0;
+  try {
+    const historyStats = await fs.stat(historyFilePath);
+    initialHistoryOffset = historyStats.size;
+    console.log(`[Claude Monitor Setup] Setting initial history offset to ${initialHistoryOffset} (current file size)`);
+  } catch (statError) {
+    // File doesn't exist yet, start from 0
+    console.log(`[Claude Monitor Setup] history.jsonl doesn't exist yet, starting from offset 0`);
+  }
+
+  const monitor = {
+    sessionKey,
+    socket,
+    homeDir,
+    workspaceDir,
+    historyFilePath,
+    historyFileOffset: initialHistoryOffset,
+    historyBuffer: '',
+    projectLogDir,
+    currentFilePath: null,
+    fileHandle: null,
+    fileOffset: 0,
+    buffer: '',
+    disposed: false,
+    pollTimer: null,
+    entryIndex: new Map(),
+    promptLogs: new Map(),
+    debounceMs: Number.isFinite(debounceMs) && debounceMs >= 0 ? debounceMs : DEFAULT_CLAUDE_TEXT_DEBOUNCE_MS,
+    lastPromptText: null, // Track last prompt to avoid duplicates
+    lastPromptTimestamp: null, // Track when the last prompt was detected
+    sessionStartTime: Date.now() // Session start time
+  };
+
+  async function closeFileHandle() {
+    if (monitor.fileHandle) {
+      try {
+        await monitor.fileHandle.close();
+      } catch {
+        // swallow
+      } finally {
+        monitor.fileHandle = null;
+      }
+    }
+  }
+
+  async function selectLatestSessionFile() {
+    console.log(`[Claude Monitor] Scanning for log files created after session start`);
+    console.log(`[Claude Monitor] Session start time: ${monitor.sessionStartTime} (${new Date(monitor.sessionStartTime).toISOString()})`);
+    console.log(`[Claude Monitor] Last prompt time: ${monitor.lastPromptTimestamp || 'none'}`);
+
+    let dirEntries;
+    try {
+      dirEntries = await fs.readdir(projectLogDir);
+      console.log(`[Claude Monitor] Found ${dirEntries.length} entries in directory`);
+    } catch (readError) {
+      console.error('[Claude Monitor] Failed to read Claude project directory:', readError);
+      return null;
+    }
+
+    if (!dirEntries || dirEntries.length === 0) {
+      console.log('[Claude Monitor] Directory is empty, no log files found');
+      return null;
+    }
+
+    const jsonlFiles = dirEntries.filter(name => name.endsWith('.jsonl'));
+    console.log(`[Claude Monitor] Found ${jsonlFiles.length} .jsonl files:`, jsonlFiles);
+
+    let latestPath = null;
+    let latestMtime = 0;
+    // Allow 2 seconds tolerance for file creation timing
+    const minTimestamp = (monitor.lastPromptTimestamp || monitor.sessionStartTime) - 2000;
+
+    for (const entryName of dirEntries) {
+      if (!entryName.endsWith('.jsonl')) {
+        continue;
+      }
+      const fullPath = path.join(projectLogDir, entryName);
+      let stats;
+      try {
+        stats = await fs.stat(fullPath);
+        console.log(`[Claude Monitor] File: ${entryName}, mtime: ${stats.mtimeMs}, created after threshold (with 2s tolerance): ${stats.mtimeMs >= minTimestamp}`);
+      } catch (statError) {
+        console.error(`[Claude Monitor] Failed to stat file ${entryName}:`, statError);
+        continue;
+      }
+      // Only consider files created around the last prompt (with 2s tolerance) or after session start
+      if (stats.mtimeMs >= minTimestamp && stats.mtimeMs > latestMtime) {
+        latestMtime = stats.mtimeMs;
+        latestPath = fullPath;
+      }
+    }
+
+    if (latestPath) {
+      console.log(`[Claude Monitor] Selected latest file: ${latestPath}`);
+    } else {
+      console.log('[Claude Monitor] No valid .jsonl file found created after prompt detection');
+    }
+
+    return latestPath;
+  }
+
+  function linkPromptState(promptLog) {
+    const session = sessionState[sessionKey];
+    if (!session || promptLog.statePrompt) {
+      return;
+    }
+    if (!Array.isArray(session.prompts) || session.prompts.length === 0) {
+      return;
+    }
+    const candidate = session.prompts.find((entry) => !entry.claudeLinked);
+    if (!candidate) {
+      return;
+    }
+    candidate.claudeLinked = true;
+    candidate.claudeUserUuid = promptLog.userEntry?.uuid ?? null;
+    const startedAt = parseTimestamp(promptLog.userEntry?.timestamp);
+    candidate.startedAt = startedAt;
+    promptLog.statePrompt = candidate;
+  }
+
+  function getOrCreatePromptLog(userUuid, userEntry) {
+    if (!userUuid) {
+      return null;
+    }
+    if (monitor.promptLogs.has(userUuid)) {
+      return monitor.promptLogs.get(userUuid);
+    }
+    const promptLog = {
+      userEntry,
+      rootUuid: userUuid,
+      entries: [],
+      startedAt: parseTimestamp(userEntry?.timestamp),
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      lastAssistantTimestamp: null,
+      lastAssistantEntry: null,
+      lastEntryRole: null,
+      lastEventTimestamp: parseTimestamp(userEntry?.timestamp),
+      debounceTimer: null,
+      debounceDueAt: null,
+      completed: false,
+      statePrompt: null,
+      status: 'waiting',
+      sawTool: false,
+      latestTextEntry: null,
+      latestTextValue: null
+    };
+    monitor.promptLogs.set(userUuid, promptLog);
+    linkPromptState(promptLog);
+    return promptLog;
+  }
+
+  function clearPromptDebounce(promptLog) {
+    if (!promptLog) {
+      return;
+    }
+    if (promptLog.debounceTimer) {
+      clearTimeout(promptLog.debounceTimer);
+      promptLog.debounceTimer = null;
+    }
+    promptLog.debounceDueAt = null;
+  }
+
+  function startPromptDebounce(promptLog, delayOverride) {
+    if (!promptLog || promptLog.completed) {
+      return;
+    }
+
+    const delay = Number.isFinite(delayOverride) && delayOverride >= 0
+      ? delayOverride
+      : monitor.debounceMs;
+
+    if (delay === 0) {
+      clearPromptDebounce(promptLog);
+      finalizePromptLog(promptLog);
+      return;
+    }
+
+    clearPromptDebounce(promptLog);
+    promptLog.debounceDueAt = Date.now() + delay;
+    promptLog.debounceTimer = setTimeout(() => {
+      if (promptLog.completed || monitor.disposed) {
+        return;
+      }
+      if (promptLog.status === 'text_ready') {
+        finalizePromptLog(promptLog);
+      }
+    }, delay);
+  }
+
+  function finalizePromptLog(promptLog) {
+    if (!promptLog || promptLog.completed) {
+      return;
+    }
+    // Allow completion by next prompt, disconnect, or normal text_ready
+    const isCompletedByEvent = promptLog.status === 'completed_by_next_prompt' ||
+                                promptLog.status === 'completed_by_disconnect' ||
+                                promptLog.status === 'completed_by_provider_change';
+    if (!isCompletedByEvent && promptLog.status !== 'text_ready' && !promptLog.latestTextEntry) {
+      return;
+    }
+    const originalStatus = promptLog.status;
+    promptLog.completed = true;
+    promptLog.status = 'completed';
+    clearPromptDebounce(promptLog);
+
+    console.log(`[Claude Monitor] Finalizing prompt with reason: ${originalStatus}`);
+
+    const finishTimestamp = promptLog.lastAssistantTimestamp ?? promptLog.lastEventTimestamp ?? Date.now();
+    const durationMs = Math.max(0, finishTimestamp - promptLog.startedAt);
+
+    console.log(`[Claude Monitor] Duration calculation:`);
+    console.log(`  Start timestamp: ${promptLog.startedAt} (${new Date(promptLog.startedAt).toISOString()})`);
+    console.log(`  Finish timestamp: ${finishTimestamp} (${new Date(finishTimestamp).toISOString()})`);
+    console.log(`  Duration: ${durationMs}ms (${(durationMs / 1000).toFixed(2)}s)`);
+
+    const session = sessionState[sessionKey];
+    if (session) {
+      session.actualDurationMs = durationMs;
+      session.totalApprovalWaitMs = 0;
+      session.approvalWaitStartTime = null;
+      session.awaitingApproval = false;
+      session.responsePending = false;
+
+      // Track the timestamp range of completed prompts for history.jsonl filtering
+      if (!session.completedPromptStartTime) {
+        session.completedPromptStartTime = promptLog.startedAt;
+      }
+      session.completedPromptEndTime = finishTimestamp;
+
+      if (promptLog.statePrompt) {
+        promptLog.statePrompt.durationMs = durationMs;
+        promptLog.statePrompt.completedAt = finishTimestamp;
+        promptLog.statePrompt.tokenUsage = {
+          inputTokens: promptLog.totalInputTokens,
+          outputTokens: promptLog.totalOutputTokens,
+          totalTokens: (promptLog.totalInputTokens || 0) + (promptLog.totalOutputTokens || 0)
+        };
+        if (promptLog.latestTextValue) {
+          promptLog.statePrompt.outputText = promptLog.latestTextValue;
+        }
+      }
+
+      session.lastPromptTokenUsage = {
+        inputTokens: promptLog.totalInputTokens,
+        outputTokens: promptLog.totalOutputTokens
+      };
+      session.lastPromptFinishedAt = finishTimestamp;
+      if (promptLog.latestTextValue) {
+        session.lastPromptOutputText = promptLog.latestTextValue;
+      }
+    }
+
+    monitor.promptLogs.delete(promptLog.rootUuid);
+    for (const timelineEntry of promptLog.entries) {
+      if (timelineEntry?.uuid) {
+        monitor.entryIndex.delete(timelineEntry.uuid);
+      }
+    }
+
+    console.log(`[Claude Monitor] Response complete detected for prompt: ${promptLog.rootUuid}`);
+    console.log(`[Claude Monitor] Calling finalizeSession for sessionKey: ${sessionKey}`);
+
+    finalizeSession({ reason: 'response-complete' }).catch((error) => {
+      console.error('[Claude Monitor] finalize session failed:', error);
+      try {
+        socket.emit(
+          'output',
+          '\r\n⚠️ Claudeセッションの終了処理に失敗しました。ログを確認してください。\r\n'
+        );
+      } catch {
+        // ignore
+      }
+    });
+  }
+
+  function handleUsageAccumulation(promptLog, entry) {
+    if (!promptLog || !entry?.usage) {
+      return;
+    }
+    const inputTokens = entry.usage.input_tokens || entry.usage.inputTokens || 0;
+    const outputTokens = entry.usage.output_tokens || entry.usage.outputTokens || 0;
+    promptLog.totalInputTokens += inputTokens;
+    promptLog.totalOutputTokens += outputTokens;
+  }
+
+  function processEntry(entry) {
+    if (!entry || typeof entry !== 'object') {
+      return;
+    }
+
+    if (entry.uuid) {
+      monitor.entryIndex.set(entry.uuid, entry);
+    }
+
+    if (entry.type === 'file-history-snapshot') {
+      return;
+    }
+
+    // Skip entries older than the last prompt we detected in history.jsonl
+    // Allow 2 second tolerance for clock skew
+    const entryTimestamp = parseTimestamp(entry.timestamp);
+    if (monitor.lastPromptTimestamp && entryTimestamp < (monitor.lastPromptTimestamp - 2000)) {
+      return; // Skip old entries
+    }
+
+    const isUserRole = entry.type === 'user' && entry.message?.role === 'user';
+    const isToolResultEvent = isUserRole && entryContainsToolResult(entry);
+
+    if (isUserRole && !isToolResultEvent) {
+      // Before creating a new prompt log, finalize any previous incomplete prompts
+      for (const [existingUuid, existingPromptLog] of monitor.promptLogs.entries()) {
+        if (!existingPromptLog.completed && existingPromptLog.uuid !== entry.uuid) {
+          console.log(`[Claude Monitor] New user prompt detected in timeline, finalizing previous prompt: ${existingUuid}`);
+          existingPromptLog.status = 'completed_by_next_prompt';
+          finalizePromptLog(existingPromptLog);
+        }
+      }
+
+      const promptLog = getOrCreatePromptLog(entry.uuid, entry);
+      if (promptLog) {
+        promptLog.entries.push(entry);
+        promptLog.status = promptLog.status || 'waiting';
+        promptLog.startedAt = parseTimestamp(entry.timestamp);
+        promptLog.lastEventTimestamp = parseTimestamp(entry.timestamp);
+        linkPromptState(promptLog);
+      }
+      return;
+    }
+
+    const rootUserUuid = getRootUserUuid(entry, monitor.entryIndex);
+    if (!rootUserUuid) {
+      return;
+    }
+
+    const rootUserEntry = monitor.entryIndex.get(rootUserUuid) || null;
+    const promptLog = getOrCreatePromptLog(rootUserUuid, rootUserEntry);
+    if (!promptLog) {
+      return;
+    }
+    linkPromptState(promptLog);
+
+    promptLog.entries.push(entry);
+    promptLog.lastEntryRole = entry.message?.role || entry.type || null;
+    promptLog.lastEventTimestamp = parseTimestamp(entry.timestamp);
+
+    if (isToolResultEvent) {
+      promptLog.lastEntryRole = 'tool_result';
+      promptLog.sawTool = true;
+      promptLog.status = 'in_progress';
+      promptLog.latestTextEntry = null;
+      promptLog.latestTextValue = null;
+      clearPromptDebounce(promptLog);
+      return;
+    }
+
+    if (entry.type === 'assistant' && entry.message?.role === 'assistant') {
+      handleUsageAccumulation(promptLog, entry);
+      promptLog.lastAssistantEntry = entry;
+      promptLog.lastAssistantTimestamp = parseTimestamp(entry.timestamp);
+
+      const hasToolUse = entryHasToolUse(entry);
+      const textValue = extractAssistantText(entry);
+      const stopReason = getStopReason(entry);
+
+      if (hasToolUse) {
+        promptLog.sawTool = true;
+        promptLog.status = 'in_progress';
+        promptLog.latestTextEntry = null;
+        promptLog.latestTextValue = null;
+        clearPromptDebounce(promptLog);
+      }
+
+      if (textValue && !hasToolUse) {
+        promptLog.latestTextEntry = entry;
+        promptLog.latestTextValue = textValue;
+        promptLog.status = 'text_ready';
+
+        // Don't auto-finalize with debounce timer
+        // Completion will be triggered by: next user prompt, disconnect, or provider change
+        console.log(`[Claude Monitor] Assistant text received, waiting for completion trigger`);
+      }
+      return;
+    }
+
+    if (entry.type === 'assistant') {
+      handleUsageAccumulation(promptLog, entry);
+    }
+
+    if (entryContainsToolResult(entry)) {
+      promptLog.sawTool = true;
+      promptLog.status = 'in_progress';
+      promptLog.latestTextEntry = null;
+      promptLog.latestTextValue = null;
+      clearPromptDebounce(promptLog);
+    }
+  }
+
+  // Monitor history.jsonl for new prompts
+  async function pollHistoryFile() {
+    try {
+      const stats = await fs.stat(monitor.historyFilePath);
+      if (stats.size <= monitor.historyFileOffset) {
+        return; // No new data
+      }
+
+      const chunkSize = stats.size - monitor.historyFileOffset;
+      const buffer = Buffer.allocUnsafe(chunkSize);
+      const fileHandle = await fs.open(monitor.historyFilePath, 'r');
+
+      try {
+        const result = await fileHandle.read(buffer, 0, chunkSize, monitor.historyFileOffset);
+        const bytesRead = result.bytesRead;
+
+        if (bytesRead > 0) {
+          monitor.historyFileOffset += bytesRead;
+          monitor.historyBuffer += buffer.slice(0, bytesRead).toString('utf8');
+
+          let newlineIndex = monitor.historyBuffer.indexOf('\n');
+          while (newlineIndex !== -1) {
+            const line = monitor.historyBuffer.slice(0, newlineIndex).trim();
+            monitor.historyBuffer = monitor.historyBuffer.slice(newlineIndex + 1);
+
+            if (line.length > 0) {
+              try {
+                const entry = JSON.parse(line);
+                // Check if this is a new prompt entry (Claude CLI uses "display" field)
+                const promptText = entry.display || entry.prompt;
+                if (promptText && promptText !== monitor.lastPromptText) {
+                  console.log(`[Claude Monitor] New prompt detected: ${promptText.substring(0, 50)}...`);
+
+                  // Don't finalize here - let the timeline user entry detection handle it
+                  // This ensures we have complete assistant responses before finalizing
+                  monitor.lastPromptText = promptText;
+                  monitor.lastPromptTimestamp = entry.timestamp || Date.now();
+                  console.log(`[Claude Monitor] Prompt timestamp: ${monitor.lastPromptTimestamp}`);
+
+                  // Now that we have a prompt, start monitoring timeline file
+                  if (!monitor.currentFilePath) {
+                    console.log('[Claude Monitor] Starting timeline log monitoring after prompt detection');
+                    await openTimelineFile();
+                  }
+                }
+              } catch (parseError) {
+                console.error('[Claude Monitor] Failed to parse history line:', parseError);
+              }
+            }
+
+            newlineIndex = monitor.historyBuffer.indexOf('\n');
+          }
+        }
+      } finally {
+        await fileHandle.close();
+      }
+    } catch (error) {
+      // File doesn't exist yet or can't be read - this is normal on first run
+      if (error.code !== 'ENOENT') {
+        console.error('[Claude Monitor] Error reading history file:', error);
+      }
+    }
+  }
+
+  async function openTimelineFile() {
+    const latestPath = await selectLatestSessionFile();
+    if (!latestPath) {
+      return;
+    }
+    console.log(`[Claude Monitor] Opening timeline log file: ${latestPath}`);
+    await closeFileHandle();
+    monitor.currentFilePath = latestPath;
+    monitor.entryIndex.clear();
+    for (const promptLog of monitor.promptLogs.values()) {
+      clearPromptDebounce(promptLog);
+    }
+    monitor.promptLogs.clear();
+
+    // Start from beginning and filter by timestamp
+    // We'll skip entries older than the last prompt timestamp from history.jsonl
+    monitor.fileOffset = 0;
+    monitor.buffer = '';
+    console.log(`[Claude Monitor] Starting from beginning of file, will skip entries older than ${monitor.lastPromptTimestamp}`);
+
+    try {
+      monitor.fileHandle = await fs.open(latestPath, 'r');
+      console.log(`[Claude Monitor] Successfully opened timeline log file`);
+    } catch (openError) {
+      console.error('[Claude Monitor] Failed to open Claude timeline log:', openError);
+      monitor.currentFilePath = null;
+      monitor.fileHandle = null;
+    }
+  }
+
+  async function pollLog() {
+    if (monitor.disposed) {
+      return;
+    }
+
+    // First, check history.jsonl for new prompts
+    await pollHistoryFile();
+
+    // If no timeline file is open yet, we're done for this poll
+    if (!monitor.currentFilePath) {
+      return;
+    }
+
+    let stats;
+    try {
+      stats = await fs.stat(monitor.currentFilePath);
+    } catch (statError) {
+      console.error('[Claude Monitor] Failed to stat Claude session log:', statError);
+      await closeFileHandle();
+      monitor.currentFilePath = null;
+      monitor.fileOffset = 0;
+      monitor.buffer = '';
+      return;
+    }
+
+    if (!stats || stats.size === monitor.fileOffset) {
+      // No new data to read
+      return;
+    }
+
+    const chunkSize = stats.size - monitor.fileOffset;
+    console.log(`[Claude Monitor] Reading ${chunkSize} bytes from offset ${monitor.fileOffset} (file size: ${stats.size})`);
+
+    const buffer = Buffer.allocUnsafe(chunkSize);
+    if (!monitor.fileHandle) {
+      try {
+        monitor.fileHandle = await fs.open(monitor.currentFilePath, 'r');
+      } catch (reopenError) {
+        console.error('[Claude Monitor] Failed to reopen Claude session log:', reopenError);
+        monitor.currentFilePath = null;
+        monitor.fileOffset = 0;
+        monitor.buffer = '';
+        return;
+      }
+    }
+
+    let bytesRead = 0;
+    try {
+      const result = await monitor.fileHandle.read(buffer, 0, chunkSize, monitor.fileOffset);
+      bytesRead = result.bytesRead;
+      console.log(`[Claude Monitor] Successfully read ${bytesRead} bytes`);
+    } catch (readError) {
+      console.error('[Claude Monitor] Failed to read Claude session log:', readError);
+      return;
+    }
+
+    if (bytesRead <= 0) {
+      console.log('[Claude Monitor] No bytes read, returning');
+      return;
+    }
+
+    monitor.fileOffset += bytesRead;
+    monitor.buffer += buffer.slice(0, bytesRead).toString('utf8');
+
+    let lineCount = 0;
+    let newlineIndex = monitor.buffer.indexOf('\n');
+    while (newlineIndex !== -1) {
+      const line = monitor.buffer.slice(0, newlineIndex).trim();
+      monitor.buffer = monitor.buffer.slice(newlineIndex + 1);
+      if (line.length > 0) {
+        lineCount++;
+        try {
+          const entry = JSON.parse(line);
+          console.log(`[Claude Monitor] Parsed entry type: ${entry.type}`);
+          processEntry(entry);
+        } catch (parseError) {
+          console.error('[Claude Monitor] Failed to parse Claude log line:', parseError);
+        }
+      }
+      newlineIndex = monitor.buffer.indexOf('\n');
+    }
+
+    if (lineCount > 0) {
+      console.log(`[Claude Monitor] Processed ${lineCount} log entries`);
+    }
+  }
+
+  monitor.dispose = async () => {
+    monitor.disposed = true;
+    if (monitor.pollTimer) {
+      clearInterval(monitor.pollTimer);
+      monitor.pollTimer = null;
+    }
+
+    // Finalize all incomplete prompts before disposing
+    console.log(`[Claude Monitor] Disposing monitor, finalizing ${monitor.promptLogs.size} incomplete prompts`);
+    for (const promptLog of monitor.promptLogs.values()) {
+      if (promptLog.debounceTimer) {
+        clearTimeout(promptLog.debounceTimer);
+        promptLog.debounceTimer = null;
+        promptLog.debounceDueAt = null;
+      }
+      if (!promptLog.completed) {
+        promptLog.status = 'completed_by_disconnect';
+        finalizePromptLog(promptLog);
+      }
+    }
+
+    monitor.promptLogs.clear();
+    monitor.entryIndex.clear();
+    await closeFileHandle();
+  };
+
+  console.log(`[Claude Monitor Setup] Starting polling timer (interval: ${CLAUDE_LOG_POLL_INTERVAL_MS}ms)`);
+  monitor.pollTimer = setInterval(() => {
+    pollLog().catch((error) => {
+      console.error('[Claude Monitor] Polling failed:', error);
+    });
+  }, CLAUDE_LOG_POLL_INTERVAL_MS);
+
+  console.log('[Claude Monitor Setup] Monitor successfully initialized');
+  return monitor;
+}
+
+async function disposeClaudeLogMonitor(sessionKey) {
+  const monitor = claudeLogMonitors[sessionKey];
+  if (!monitor) {
+    return;
+  }
+  delete claudeLogMonitors[sessionKey];
+  try {
+    await monitor.dispose();
+  } catch (disposeError) {
+    console.error('Failed to dispose Claude log monitor:', disposeError);
+  }
+}
+
+const CODEX_INTERMEDIATE_TYPES = new Set([
+  'function_call',
+  'function_call_output',
+  'custom_tool_call',
+  'custom_tool_call_output',
+  'reasoning'
+]);
+
+async function setupCodexLogMonitor({
+  homeDir,
+  workspaceDir,
+  sessionKey,
+  finalizeSession,
+  socket,
+  debounceMs
+}) {
+  const sessionsRoot = path.join(homeDir, '.codex', 'sessions');
+  try {
+    await fs.mkdir(sessionsRoot, { recursive: true });
+  } catch (mkdirError) {
+    console.error('Failed to ensure Codex session directory:', mkdirError);
+    return null;
+  }
+
+  const emailSegment = path.basename(homeDir);
+  const relativeToHome = path.relative(homeDir, workspaceDir);
+  const normalizedRelative = !relativeToHome || relativeToHome.startsWith('..')
+    ? null
+    : relativeToHome.split(path.sep).join('/');
+  const containerWorkspaceDir = normalizedRelative
+    ? `/app/user_projects/${emailSegment}/${normalizedRelative}`
+    : null;
+
+  const acceptedCwds = new Set([workspaceDir]);
+  if (containerWorkspaceDir) {
+    acceptedCwds.add(containerWorkspaceDir);
+  }
+
+  const monitor = {
+    sessionKey,
+    socket,
+    sessionsRoot,
+    acceptedCwds,
+    currentFilePath: null,
+    fileHandle: null,
+    fileOffset: 0,
+    buffer: '',
+    disposed: false,
+    pollTimer: null,
+    debounceMs: Number.isFinite(debounceMs) && debounceMs >= 0 ? debounceMs : DEFAULT_CODEX_TEXT_DEBOUNCE_MS,
+    promptQueue: [],
+    activeSessionId: null,
+    lastActivityTs: Date.now(),
+    skippedFiles: new Set(),
+    lastUserMessage: null,
+    lastFileCheckTime: 0,
+    fileCheckInterval: 5000 // Check for new files every 5 seconds
+  };
+
+  function clearPromptDebounce(prompt) {
+    if (!prompt) {
+      return;
+    }
+    if (prompt.debounceTimer) {
+      clearTimeout(prompt.debounceTimer);
+      prompt.debounceTimer = null;
+    }
+    prompt.debounceDueAt = null;
+  }
+
+  function markPromptInProgress(prompt) {
+    if (!prompt || prompt.status === 'completed') {
+      return;
+    }
+    prompt.status = 'in_progress';
+    prompt.sawTool = true;
+    prompt.latestAssistantText = null;
+    prompt.latestAssistantTimestamp = null;
+    clearPromptDebounce(prompt);
+  }
+
+  function linkPromptState(prompt) {
+    if (!prompt || prompt.statePrompt) {
+      return;
+    }
+    const session = sessionState[sessionKey];
+    if (!session || !Array.isArray(session.prompts) || session.prompts.length === 0) {
+      return;
+    }
+    const candidate = session.prompts.find((entry) => !entry.codexLinked);
+    if (!candidate) {
+      return;
+    }
+    candidate.codexLinked = true;
+    candidate.codexPromptId = prompt.id;
+    if (typeof prompt.startedAt === 'number') {
+      candidate.startedAt = prompt.startedAt;
+    }
+    prompt.statePrompt = candidate;
+  }
+
+  function startPromptDebounce(prompt, delayOverride) {
+    if (!prompt || prompt.status === 'completed') {
+      return;
+    }
+
+    const delay = Number.isFinite(delayOverride) && delayOverride >= 0
+      ? delayOverride
+      : monitor.debounceMs;
+
+    if (delay === 0) {
+      clearPromptDebounce(prompt);
+      finalizePrompt(prompt);
+      return;
+    }
+
+    clearPromptDebounce(prompt);
+    prompt.debounceDueAt = Date.now() + delay;
+    prompt.debounceTimer = setTimeout(() => {
+      if (monitor.disposed || prompt.status !== 'text_ready') {
+        return;
+      }
+      finalizePrompt(prompt);
+    }, delay);
+  }
+
+  function getActivePrompt() {
+    if (monitor.promptQueue.length === 0) {
+      return null;
+    }
+    return monitor.promptQueue[0];
+  }
+
+  function removePrompt(prompt) {
+    const index = monitor.promptQueue.indexOf(prompt);
+    if (index !== -1) {
+      monitor.promptQueue.splice(index, 1);
+    }
+  }
+
+  function updateTokenUsage(prompt, info) {
+    if (!prompt || !info) {
+      return;
+    }
+    const usageSource = info.last_token_usage || info.total_token_usage;
+    if (!usageSource) {
+      return;
+    }
+    prompt.tokenUsage = {
+      inputTokens: usageSource.input_tokens ?? usageSource.inputTokens ?? null,
+      outputTokens: usageSource.output_tokens ?? usageSource.outputTokens ?? null,
+      reasoningTokens: usageSource.reasoning_output_tokens ?? usageSource.reasoningOutputTokens ?? null,
+      totalTokens: usageSource.total_tokens ?? usageSource.totalTokens ?? null
+    };
+  }
+
+  function finalizePrompt(prompt) {
+    if (!prompt || prompt.status === 'completed') {
+      return;
+    }
+
+    prompt.status = 'completed';
+    clearPromptDebounce(prompt);
+
+    const finishTimestamp = prompt.lastAssistantTimestamp
+      ?? prompt.lastEventTimestamp
+      ?? Date.now();
+    const startedAt = prompt.startedAt ?? finishTimestamp;
+    const durationMs = Math.max(0, finishTimestamp - startedAt);
+
+    const session = sessionState[sessionKey];
+    if (session) {
+      session.actualDurationMs = durationMs;
+      session.totalApprovalWaitMs = 0;
+      session.approvalWaitStartTime = null;
+      session.awaitingApproval = false;
+      session.responsePending = false;
+
+      // Track the timestamp range of completed prompts for history.jsonl filtering (same as Claude)
+      if (!session.completedPromptStartTime) {
+        session.completedPromptStartTime = prompt.startedAt;
+      }
+      session.completedPromptEndTime = finishTimestamp;
+
+      if (prompt.statePrompt) {
+        prompt.statePrompt.durationMs = durationMs;
+        prompt.statePrompt.completedAt = finishTimestamp;
+        if (prompt.latestAssistantText) {
+          prompt.statePrompt.outputText = prompt.latestAssistantText;
+        }
+        if (prompt.tokenUsage) {
+          prompt.statePrompt.tokenUsage = {
+            inputTokens: prompt.tokenUsage.inputTokens ?? 0,
+            outputTokens: prompt.tokenUsage.outputTokens ?? 0,
+            reasoningTokens: prompt.tokenUsage.reasoningTokens ?? 0,
+            totalTokens: prompt.tokenUsage.totalTokens ?? 0
+          };
+        }
+      }
+
+      if (prompt.tokenUsage) {
+        session.lastPromptTokenUsage = {
+          inputTokens: prompt.tokenUsage.inputTokens ?? 0,
+          outputTokens: prompt.tokenUsage.outputTokens ?? 0,
+          reasoningTokens: prompt.tokenUsage.reasoningTokens ?? 0,
+          totalTokens: prompt.tokenUsage.totalTokens ?? 0
+        };
+      } else {
+        session.lastPromptTokenUsage = undefined;
+      }
+      session.lastPromptFinishedAt = finishTimestamp;
+      if (prompt.latestAssistantText) {
+        session.lastPromptOutputText = prompt.latestAssistantText;
+      }
+    }
+
+    removePrompt(prompt);
+
+    console.log(`[Codex Monitor] Response complete detected for prompt`);
+    console.log(`[Codex Monitor] Calling finalizeSession for sessionKey: ${sessionKey}`);
+
+    finalizeSession({ reason: 'response-complete' }).catch((error) => {
+      console.error('[Codex Monitor] finalize session failed:', error);
+      try {
+        socket.emit(
+          'output',
+          '\r\n⚠️ Codexセッションの終了処理に失敗しました。ログを確認してください。\r\n'
+        );
+      } catch {
+        // ignore
+      }
+    });
+  }
+
+  function expireStalePrompts(reason) {
+    if (monitor.promptQueue.length === 0) {
+      return;
+    }
+    const snapshot = [...monitor.promptQueue];
+    for (const prompt of snapshot) {
+      if (prompt.status === 'completed') {
+        continue;
+      }
+      if (reason === 'session-switch' || reason === 'dispose') {
+        finalizePrompt(prompt);
+      } else if (reason === 'new-user-message') {
+        finalizePrompt(prompt);
+      }
+    }
+  }
+
+  function pushUserPrompt(entry, messageText) {
+    const trimmed = typeof messageText === 'string' ? messageText.trim() : '';
+    if (!trimmed || trimmed.startsWith('<environment_context')) {
+      return;
+    }
+
+    const timestampMs = parseTimestamp(entry.timestamp);
+    if (monitor.lastUserMessage && monitor.lastUserMessage.text === trimmed) {
+      const delta = Math.abs(timestampMs - monitor.lastUserMessage.timestamp);
+      if (delta <= 200) {
+        return;
+      }
+    }
+
+    expireStalePrompts('new-user-message');
+
+    const prompt = {
+      id: randomUUID(),
+      userEntry: entry,
+      promptText: trimmed,
+      startedAt: timestampMs,
+      lastEventTimestamp: timestampMs,
+      status: 'pending',
+      sawTool: false,
+      latestAssistantText: null,
+      latestAssistantTimestamp: null,
+      debounceTimer: null,
+      debounceDueAt: null,
+      statePrompt: null,
+      tokenUsage: null
+    };
+
+    monitor.promptQueue.push(prompt);
+    monitor.lastActivityTs = Date.now();
+    monitor.lastUserMessage = { text: trimmed, timestamp: timestampMs };
+    linkPromptState(prompt);
+    const session = sessionState[sessionKey];
+    if (session) {
+      session.responsePending = true;
+    }
+  }
+
+  function handleAssistantMessage(entry) {
+    const prompt = getActivePrompt();
+    if (!prompt) {
+      return;
+    }
+
+    linkPromptState(prompt);
+    prompt.lastEventTimestamp = parseTimestamp(entry.timestamp);
+    const textValue = extractAssistantText(entry);
+    const stopReason = getStopReason(entry);
+    const shouldSkipDebounce = stopReason === 'end_turn' || stopReason === 'stop_sequence';
+    const hasText = typeof textValue === 'string' && textValue.length > 0;
+
+    if (hasText) {
+      prompt.latestAssistantText = textValue;
+      prompt.latestAssistantTimestamp = parseTimestamp(entry.timestamp);
+      prompt.status = 'text_ready';
+      monitor.lastActivityTs = Date.now();
+      startPromptDebounce(prompt, shouldSkipDebounce ? 0 : undefined);
+    }
+  }
+
+  async function selectLatestSessionFile() {
+    let latestPath = null;
+    let latestMtime = 0;
+
+    async function safeReadDir(target) {
+      try {
+        return await fs.readdir(target, { withFileTypes: true });
+      } catch {
+        return [];
+      }
+    }
+
+    const yearEntries = await safeReadDir(sessionsRoot);
+    const years = yearEntries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a));
+
+    for (const year of years) {
+      const yearDir = path.join(sessionsRoot, year);
+      const monthEntries = await safeReadDir(yearDir);
+      const months = monthEntries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort((a, b) => b.localeCompare(a));
+
+      for (const month of months) {
+        const monthDir = path.join(yearDir, month);
+        const dayEntries = await safeReadDir(monthDir);
+        const days = dayEntries
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name)
+          .sort((a, b) => b.localeCompare(a));
+
+        for (const day of days) {
+          const dayDir = path.join(monthDir, day);
+          const fileEntries = await safeReadDir(dayDir);
+          const files = fileEntries
+            .filter((entry) => entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl'))
+            .map((entry) => entry.name)
+            .sort((a, b) => b.localeCompare(a));
+
+          for (const fileName of files) {
+            const fullPath = path.join(dayDir, fileName);
+            if (monitor.skippedFiles.has(fullPath)) {
+              continue;
+            }
+            let stats;
+            try {
+              stats = await fs.stat(fullPath);
+            } catch {
+              continue;
+            }
+            if (stats.mtimeMs > latestMtime) {
+              latestMtime = stats.mtimeMs;
+              latestPath = fullPath;
+            }
+          }
+
+          if (latestPath) {
+            return latestPath;
+          }
+        }
+      }
+    }
+
+    return latestPath;
+  }
+
+  async function closeFileHandle() {
+    if (monitor.fileHandle) {
+      try {
+        await monitor.fileHandle.close();
+      } catch {
+        // ignore
+      } finally {
+        monitor.fileHandle = null;
+      }
+    }
+  }
+
+  async function reopenLatestFile() {
+    const latestPath = await selectLatestSessionFile();
+    if (!latestPath) {
+      return false;
+    }
+
+    if (monitor.currentFilePath === latestPath && monitor.fileHandle) {
+      return true;
+    }
+
+    await closeFileHandle();
+    monitor.currentFilePath = latestPath;
+    monitor.fileOffset = 0;
+    monitor.buffer = '';
+    monitor.activeSessionId = null;
+    monitor.lastActivityTs = Date.now();
+    expireStalePrompts('session-switch');
+    monitor.promptQueue.length = 0;
+    monitor.lastUserMessage = null;
+
+    try {
+      monitor.fileHandle = await fs.open(latestPath, 'r');
+      return true;
+    } catch (openError) {
+      console.error('Failed to open Codex session log:', openError);
+      monitor.currentFilePath = null;
+      monitor.fileHandle = null;
+      return false;
+    }
+  }
+
+  function handleSessionMeta(entry) {
+    const payload = entry?.payload || {};
+    const cwd = payload.cwd;
+    if (cwd && !monitor.acceptedCwds.has(cwd)) {
+      if (monitor.currentFilePath) {
+        monitor.skippedFiles.add(monitor.currentFilePath);
+      }
+      monitor.currentFilePath = null;
+      monitor.fileOffset = 0;
+      monitor.buffer = '';
+      monitor.activeSessionId = null;
+      monitor.lastUserMessage = null;
+      closeFileHandle().catch(() => {});
+      expireStalePrompts('session-switch');
+      return;
+    }
+
+    monitor.activeSessionId = payload.id || monitor.activeSessionId;
+  }
+
+  function processEntry(entry) {
+    if (!entry || typeof entry !== 'object') {
+      return;
+    }
+
+    monitor.lastActivityTs = Date.now();
+
+    switch (entry.type) {
+      case 'session_meta':
+        handleSessionMeta(entry);
+        return;
+      case 'event_msg': {
+        const payload = entry.payload || {};
+        const eventType = payload.type;
+        if (eventType === 'user_message') {
+          pushUserPrompt(entry, payload.message);
+        } else if (eventType === 'token_count') {
+          const prompt = getActivePrompt();
+          if (prompt) {
+            updateTokenUsage(prompt, payload.info);
+            prompt.lastEventTimestamp = parseTimestamp(entry.timestamp);
+            markPromptInProgress(prompt);
+          }
+        }
+        return;
+      }
+      case 'response_item': {
+        const payload = entry.payload || {};
+        const itemType = payload.type;
+        const role = payload.role;
+
+        if (role === 'assistant') {
+          if (itemType === 'message') {
+            handleAssistantMessage(entry);
+          } else if (CODEX_INTERMEDIATE_TYPES.has(itemType)) {
+            const prompt = getActivePrompt();
+            if (prompt) {
+              prompt.lastEventTimestamp = parseTimestamp(entry.timestamp);
+              markPromptInProgress(prompt);
+            }
+          }
+        } else if (role === 'user' && itemType === 'message') {
+          const content = Array.isArray(payload.content) ? payload.content : [];
+          const parts = [];
+          for (const part of content) {
+            if (part?.type === 'input_text' && typeof part.text === 'string') {
+              parts.push(part.text);
+            }
+          }
+          if (parts.length > 0) {
+            pushUserPrompt(entry, parts.join('\n'));
+          }
+        } else if (CODEX_INTERMEDIATE_TYPES.has(itemType)) {
+          const prompt = getActivePrompt();
+          if (prompt) {
+            prompt.lastEventTimestamp = parseTimestamp(entry.timestamp);
+            markPromptInProgress(prompt);
+          }
+        }
+
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  async function pollLog() {
+    if (monitor.disposed) {
+      return;
+    }
+
+    // Periodically check for newer log files
+    const now = Date.now();
+    const shouldCheckForNewFiles = !monitor.currentFilePath || (now - monitor.lastFileCheckTime >= monitor.fileCheckInterval);
+
+    if (shouldCheckForNewFiles) {
+      monitor.lastFileCheckTime = now;
+      const opened = await reopenLatestFile();
+      if (!opened && !monitor.currentFilePath) {
+        return;
+      }
+    }
+
+    if (!monitor.currentFilePath) {
+      return;
+    }
+
+    let stats;
+    try {
+      stats = await fs.stat(monitor.currentFilePath);
+    } catch (statError) {
+      console.error('Failed to stat Codex session log:', statError);
+      monitor.skippedFiles.add(monitor.currentFilePath);
+      monitor.currentFilePath = null;
+      monitor.fileOffset = 0;
+      monitor.buffer = '';
+      await closeFileHandle();
+      expireStalePrompts('session-switch');
+      return;
+    }
+
+    if (!stats || stats.size <= monitor.fileOffset) {
+      return;
+    }
+
+    const chunkSize = stats.size - monitor.fileOffset;
+    const buffer = Buffer.allocUnsafe(chunkSize);
+    if (!monitor.fileHandle) {
+      try {
+        monitor.fileHandle = await fs.open(monitor.currentFilePath, 'r');
+      } catch (openError) {
+        console.error('Failed to reopen Codex session log:', openError);
+        monitor.skippedFiles.add(monitor.currentFilePath);
+        monitor.currentFilePath = null;
+        monitor.fileOffset = 0;
+        monitor.buffer = '';
+        expireStalePrompts('session-switch');
+        return;
+      }
+    }
+
+    let bytesRead = 0;
+    try {
+      const result = await monitor.fileHandle.read(buffer, 0, chunkSize, monitor.fileOffset);
+      bytesRead = result.bytesRead;
+    } catch (readError) {
+      console.error('Failed to read Codex session log:', readError);
+      return;
+    }
+
+    if (bytesRead <= 0) {
+      return;
+    }
+
+    monitor.fileOffset += bytesRead;
+    monitor.buffer += buffer.slice(0, bytesRead).toString('utf8');
+
+    let newlineIndex = monitor.buffer.indexOf('\n');
+    while (newlineIndex !== -1) {
+      const line = monitor.buffer.slice(0, newlineIndex).trim();
+      monitor.buffer = monitor.buffer.slice(newlineIndex + 1);
+
+      if (line.length > 0) {
+        try {
+          const entry = JSON.parse(line);
+          processEntry(entry);
+        } catch (parseError) {
+          console.error('Failed to parse Codex log line:', parseError);
+        }
+      }
+
+      newlineIndex = monitor.buffer.indexOf('\n');
+    }
+  }
+
+  monitor.dispose = async () => {
+    monitor.disposed = true;
+    if (monitor.pollTimer) {
+      clearInterval(monitor.pollTimer);
+      monitor.pollTimer = null;
+    }
+    const pending = [...monitor.promptQueue];
+    for (const prompt of pending) {
+      finalizePrompt(prompt);
+    }
+    monitor.promptQueue.length = 0;
+    monitor.lastUserMessage = null;
+    await closeFileHandle();
+  };
+
+  monitor.pollTimer = setInterval(() => {
+    pollLog().catch((error) => {
+      console.error('Codex log polling failed:', error);
+    });
+  }, CODEX_LOG_POLL_INTERVAL_MS);
+
+  return monitor;
+}
+
+async function disposeCodexLogMonitor(sessionKey) {
+  const monitor = codexLogMonitors[sessionKey];
+  if (!monitor) {
+    return;
+  }
+  delete codexLogMonitors[sessionKey];
+  try {
+    await monitor.dispose();
+  } catch (disposeError) {
+    console.error('Failed to dispose Codex log monitor:', disposeError);
+  }
+}
+
+async function setupGeminiLogMonitor({
+  homeDir,
+  workspaceDir,
+  sessionKey,
+  finalizeSession,
+  socket,
+  turnIdleMs,
+  sessionIdleMs,
+  projectId,
+  db
+}) {
+  const geminiTmpRoot = path.join(homeDir, '.gemini', 'tmp');
+
+  try {
+    await fs.mkdir(geminiTmpRoot, { recursive: true });
+  } catch (mkdirError) {
+    console.error('Failed to ensure Gemini session directory:', mkdirError);
+    return null;
+  }
+
+  const emailSegment = path.basename(homeDir);
+  const relativeToHome = path.relative(homeDir, workspaceDir);
+  const normalizedRelative = !relativeToHome || relativeToHome.startsWith('..')
+    ? null
+    : relativeToHome.split(path.sep).join('/');
+  const containerWorkspaceDir = normalizedRelative
+    ? `/app/user_projects/${emailSegment}/${normalizedRelative}`
+    : null;
+
+  const monitor = {
+    sessionKey,
+    socket,
+    geminiTmpRoot,
+    currentFilePath: null,
+    disposed: false,
+    pollTimer: null,
+    turnIdleMs: Number.isFinite(turnIdleMs) && turnIdleMs >= 0 ? turnIdleMs : DEFAULT_GEMINI_TURN_IDLE_MS,
+    sessionIdleMs: Number.isFinite(sessionIdleMs) && sessionIdleMs >= 0 ? sessionIdleMs : DEFAULT_GEMINI_SESSION_IDLE_MS,
+    activeTurn: null,
+    lastProcessedIndex: -1,
+    lastFileUpdatedMs: 0,
+    lastActivityMs: Date.now(),
+    skippedFiles: new Set(),
+    lastUserMessage: null,
+    acceptedWorkspaces: new Set([workspaceDir]),
+    lastFileCheckTime: 0,
+    fileCheckInterval: 5000, // Check for new files every 5 seconds
+    projectId,
+    db
+  };
+
+  if (containerWorkspaceDir) {
+    monitor.acceptedWorkspaces.add(containerWorkspaceDir);
+  }
+
+  function linkTurnState(turn) {
+    if (!turn || turn.statePrompt) {
+      return;
+    }
+    const session = sessionState[sessionKey];
+    if (!session || !Array.isArray(session.prompts) || session.prompts.length === 0) {
+      return;
+    }
+    const candidate = session.prompts.find((entry) => !entry.geminiLinked);
+    if (!candidate) {
+      return;
+    }
+    candidate.geminiLinked = true;
+    candidate.geminiPromptId = turn.id;
+    if (typeof candidate.startedAt === 'number') {
+      turn.startedAt = candidate.startedAt;
+    }
+    turn.statePrompt = candidate;
+  }
+
+  function applyTokenUsageFromMessage(message) {
+    if (!message || !message.tokens) {
+      return null;
+    }
+    const tokens = message.tokens;
+    return {
+      inputTokens: tokens.input ?? tokens.prompt ?? tokens.total_input ?? 0,
+      outputTokens: tokens.output ?? tokens.completion ?? tokens.total_output ?? 0,
+      reasoningTokens: tokens.thoughts ?? tokens.reasoning ?? 0,
+      totalTokens: tokens.total ?? (tokens.input ?? 0) + (tokens.output ?? 0)
+    };
+  }
+
+  function finalizeActiveTurn(reason) {
+    const turn = monitor.activeTurn;
+    if (!turn || turn.completed) {
+      monitor.activeTurn = null;
+      return;
+    }
+
+    turn.completed = true;
+
+    const finishMs = turn.lastActivityMs ?? monitor.lastFileUpdatedMs ?? Date.now();
+    const startedAt = turn.startedAt ?? finishMs;
+    const durationMs = Math.max(0, finishMs - startedAt);
+    const outputText = turn.lastGeminiMessage?.content ?? '';
+    const tokenUsage = turn.lastGeminiTokens ?? null;
+
+    const session = sessionState[sessionKey];
+    if (session) {
+      session.actualDurationMs = durationMs;
+      session.totalApprovalWaitMs = 0;
+      session.approvalWaitStartTime = null;
+      session.awaitingApproval = false;
+      session.responsePending = false;
+
+      // Track the timestamp range of completed prompts for logs.json filtering (same as Claude/Codex)
+      if (!session.completedPromptStartTime) {
+        session.completedPromptStartTime = startedAt;
+      }
+      session.completedPromptEndTime = finishMs;
+
+      if (turn.statePrompt) {
+        turn.statePrompt.durationMs = durationMs;
+        turn.statePrompt.completedAt = finishMs;
+        turn.statePrompt.outputText = outputText;
+        if (tokenUsage) {
+          turn.statePrompt.tokenUsage = {
+            inputTokens: tokenUsage.inputTokens ?? 0,
+            outputTokens: tokenUsage.outputTokens ?? 0,
+            reasoningTokens: tokenUsage.reasoningTokens ?? 0,
+            totalTokens: tokenUsage.totalTokens ?? 0
+          };
+        }
+      }
+
+      if (tokenUsage) {
+        session.lastPromptTokenUsage = {
+          inputTokens: tokenUsage.inputTokens ?? 0,
+          outputTokens: tokenUsage.outputTokens ?? 0,
+          reasoningTokens: tokenUsage.reasoningTokens ?? 0,
+          totalTokens: tokenUsage.totalTokens ?? 0
+        };
+      } else {
+        session.lastPromptTokenUsage = undefined;
+      }
+      session.lastPromptFinishedAt = finishMs;
+      session.lastPromptOutputText = outputText;
+    }
+
+    monitor.activeTurn = null;
+
+    console.log(`[Gemini Monitor] Turn finalized with reason: ${reason || 'response-complete'}`);
+    console.log(`[Gemini Monitor] Calling finalizeSession for sessionKey: ${sessionKey}`);
+
+    finalizeSession({ reason: reason || 'response-complete' }).catch((error) => {
+      console.error('[Gemini Monitor] finalize session failed:', error);
+      try {
+        socket.emit(
+          'output',
+          '\r\n⚠️ Geminiセッションの終了処理に失敗しました。ログを確認してください。\r\n'
+        );
+      } catch {
+        // ignore
+      }
+    });
+  }
+
+  function startNewTurn(message) {
+    if (!message) {
+      return;
+    }
+
+    const rawContent = typeof message.content === 'string' ? message.content.trim() : '';
+    if (!rawContent || rawContent.startsWith('<environment_context')) {
+      return;
+    }
+
+    const timestampMs = parseTimestamp(message.timestamp);
+    if (monitor.lastUserMessage && monitor.lastUserMessage.text === rawContent) {
+      const delta = Math.abs(timestampMs - monitor.lastUserMessage.timestamp);
+      if (delta <= 200) {
+        return;
+      }
+    }
+
+    if (monitor.activeTurn) {
+      finalizeActiveTurn('next-user');
+    }
+
+    monitor.activeTurn = {
+      id: randomUUID(),
+      userMessage: message,
+      startedAt: timestampMs,
+      lastActivityMs: timestampMs,
+      lastGeminiMessage: null,
+      lastGeminiTokens: null,
+      statePrompt: null,
+      completed: false
+    };
+
+    monitor.lastUserMessage = { text: rawContent, timestamp: timestampMs };
+    monitor.lastActivityMs = Math.max(monitor.lastActivityMs, timestampMs);
+    monitor.lastFileUpdatedMs = Math.max(monitor.lastFileUpdatedMs, timestampMs);
+
+    const session = sessionState[sessionKey];
+    if (session) {
+      session.responsePending = true;
+    }
+
+    linkTurnState(monitor.activeTurn);
+  }
+
+  function updateGeminiResponse(message) {
+    const turn = monitor.activeTurn;
+    if (!turn) {
+      return;
+    }
+
+    const timestampMs = parseTimestamp(message.timestamp);
+    turn.lastGeminiMessage = message;
+    turn.lastGeminiTokens = applyTokenUsageFromMessage(message);
+    turn.lastActivityMs = timestampMs;
+    monitor.lastActivityMs = Math.max(monitor.lastActivityMs, timestampMs);
+    monitor.lastFileUpdatedMs = Math.max(monitor.lastFileUpdatedMs, timestampMs);
+  }
+
+  async function safeReadDir(target) {
+    try {
+      return await fs.readdir(target, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+  }
+
+  async function selectLatestSessionFile() {
+    let latestPath = null;
+    let latestMtime = 0;
+
+    const hashEntries = await safeReadDir(geminiTmpRoot);
+    const hashDirs = hashEntries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a));
+
+    for (const hash of hashDirs) {
+      const chatsDir = path.join(geminiTmpRoot, hash, 'chats');
+      const chatEntries = await safeReadDir(chatsDir);
+      const files = chatEntries
+        .filter((entry) => entry.isFile() && entry.name.startsWith('session-') && entry.name.endsWith('.json'))
+        .map((entry) => entry.name)
+        .sort((a, b) => b.localeCompare(a));
+
+      for (const fileName of files) {
+        const fullPath = path.join(chatsDir, fileName);
+        if (monitor.skippedFiles.has(fullPath)) {
+          continue;
+        }
+        let stats;
+        try {
+          stats = await fs.stat(fullPath);
+        } catch {
+          continue;
+        }
+
+        if (stats.mtimeMs > latestMtime) {
+          latestMtime = stats.mtimeMs;
+          latestPath = fullPath;
+        }
+      }
+
+      if (latestPath) {
+        return latestPath;
+      }
+    }
+
+    return latestPath;
+  }
+
+  async function pollLog() {
+    if (monitor.disposed) {
+      return;
+    }
+
+    // Periodically check for newer log files
+    const now = Date.now();
+    const shouldCheckForNewFiles = !monitor.currentFilePath || (now - monitor.lastFileCheckTime >= monitor.fileCheckInterval);
+
+    let latestPath = monitor.currentFilePath;
+
+    if (shouldCheckForNewFiles) {
+      monitor.lastFileCheckTime = now;
+      latestPath = await selectLatestSessionFile();
+
+      if (!latestPath) {
+        if (now - monitor.lastActivityMs >= monitor.sessionIdleMs) {
+          finalizeActiveTurn('session-idle');
+        }
+        return;
+      }
+
+      if (monitor.currentFilePath !== latestPath) {
+        console.log(`[Gemini Monitor] Switching to new log file: ${latestPath}`);
+        console.log(`[Gemini Monitor] Previous file: ${monitor.currentFilePath || 'none'}`);
+        finalizeActiveTurn('session-switch');
+        monitor.currentFilePath = latestPath;
+        monitor.lastProcessedIndex = -1;
+        monitor.activeTurn = null;
+        monitor.lastFileUpdatedMs = 0;
+        monitor.lastUserMessage = null;
+
+        // Extract and save hash folder mapping to database
+        const match = latestPath.match(/\.gemini\/tmp\/([^\/]+)\//);
+        if (match && match[1] && monitor.projectId && monitor.db) {
+          const hashFolder = match[1];
+          saveGeminiHashFolder(monitor.projectId, hashFolder, monitor.db).catch(err => {
+            console.error('[Gemini Monitor] Failed to save hash folder mapping:', err);
+          });
+        }
+
+        // Reset timestamp range when switching to new session file
+        const session = sessionState[sessionKey];
+        if (session) {
+          session.completedPromptStartTime = null;
+          session.completedPromptEndTime = null;
+        }
+      }
+    }
+
+    if (!monitor.currentFilePath) {
+      return;
+    }
+
+    let fileContent;
+    try {
+      fileContent = await fs.readFile(monitor.currentFilePath, 'utf8');
+    } catch (readError) {
+      console.error('Failed to read Gemini session log:', readError);
+      monitor.skippedFiles.add(monitor.currentFilePath);
+      monitor.currentFilePath = null;
+      monitor.lastProcessedIndex = -1;
+      return;
+    }
+
+    if (!fileContent) {
+      return;
+    }
+
+    let json;
+    try {
+      json = JSON.parse(fileContent);
+    } catch (parseError) {
+      // Partial write or in-progress update: wait for next poll
+      return;
+    }
+
+    const workspaceMatches = typeof json?.cwd === 'string'
+      ? monitor.acceptedWorkspaces.has(json.cwd)
+      : true;
+
+    if (!workspaceMatches) {
+      monitor.skippedFiles.add(monitor.currentFilePath);
+      monitor.currentFilePath = null;
+      monitor.lastProcessedIndex = -1;
+      monitor.activeTurn = null;
+      monitor.lastUserMessage = null;
+      return;
+    }
+
+    const messages = Array.isArray(json?.messages) ? json.messages : [];
+    const lastUpdatedMs = json?.lastUpdated ? parseTimestamp(json.lastUpdated) : null;
+
+    if (lastUpdatedMs) {
+      monitor.lastFileUpdatedMs = Math.max(monitor.lastFileUpdatedMs, lastUpdatedMs);
+      monitor.lastActivityMs = Math.max(monitor.lastActivityMs, lastUpdatedMs);
+    }
+
+    const startIndex = Math.max(monitor.lastProcessedIndex + 1, 0);
+    for (let i = startIndex; i < messages.length; i += 1) {
+      const message = messages[i];
+      const type = message?.type;
+
+      if (type === 'user') {
+        startNewTurn(message);
+      } else if (type === 'gemini') {
+        updateGeminiResponse(message);
+      }
+
+      const messageTs = parseTimestamp(message?.timestamp);
+      monitor.lastActivityMs = Math.max(monitor.lastActivityMs, messageTs);
+      monitor.lastFileUpdatedMs = Math.max(monitor.lastFileUpdatedMs, messageTs);
+    }
+
+    if (messages.length > 0) {
+      monitor.lastProcessedIndex = messages.length - 1;
+    }
+
+    // Don't finalize on turn-idle or session-idle - wait for next user prompt (same as Claude/Codex)
+    // Only finalize on exit/dispose or next user prompt
+    // session-idle is detected but doesn't trigger finalize anymore
+  }
+
+  monitor.dispose = async () => {
+    monitor.disposed = true;
+    if (monitor.pollTimer) {
+      clearInterval(monitor.pollTimer);
+      monitor.pollTimer = null;
+    }
+    finalizeActiveTurn('dispose');
+  };
+
+  monitor.pollTimer = setInterval(() => {
+    pollLog().catch((error) => {
+      console.error('Gemini log polling failed:', error);
+    });
+  }, GEMINI_LOG_POLL_INTERVAL_MS);
+
+  return monitor;
+}
+
+async function disposeGeminiLogMonitor(sessionKey) {
+  const monitor = geminiLogMonitors[sessionKey];
+  if (!monitor) {
+    return;
+  }
+  delete geminiLogMonitors[sessionKey];
+
+  // Reset Gemini timestamp range when disposing monitor
+  const session = sessionState[sessionKey];
+  if (session) {
+    session.completedPromptStartTime = null;
+    session.completedPromptEndTime = null;
+  }
+
+  try {
+    await monitor.dispose();
+  } catch (disposeError) {
+    console.error('Failed to dispose Gemini log monitor:', disposeError);
+  }
+}
 
 function ensureSessionState(sessionKey, defaultProvider) {
   if (!sessionState[sessionKey]) {
@@ -27,10 +2042,9 @@ function ensureSessionState(sessionKey, defaultProvider) {
       lastPromptStartedAt: null,
       responsePending: false,
       finalizedPromptIds: new Set(),
-      escToInterruptVisible: false,
-      escToInterruptStartTime: null,
-      responseCompleteTimer: null,
-      actualDurationMs: null
+      actualDurationMs: null,
+      completedPromptStartTime: null,
+      completedPromptEndTime: null
     };
   }
   return sessionState[sessionKey];
@@ -399,251 +2413,294 @@ module.exports = (io) => {
     socket.join(projectRoom);
     const gitManager = new GitManager(workspaceDir);
 
-    // ターミナル画面バッファを保持（最新の部分のみ）
-    // "esc to interrupt"は画面の最新部分に表示されるので、古い部分は不要
-    let terminalScreenBuffer = '';
-    const MAX_BUFFER_SIZE = 2000; // 最新の2000文字のみ保持（"esc to"を含む領域）
+    const sessionKey = socket.id;
+    const initialState = ensureSessionState(sessionKey, providerConfig.displayName);
+    initialState.provider = providerConfig.displayName;
 
-    // 定期的にバッファをチェック（出力がなくても消失を検知するため）
-    // プロンプト送信後、3つの変数(escToInterruptVisible, awaitingApproval, responsePending)が
-    // すべてfalseになるまで監視を継続
-    let bufferCheckInterval = null;
-    const startBufferPolling = () => {
-      if (bufferCheckInterval) return;
+    // Dispose existing monitors when switching providers
+    console.log(`[Socket Connection] Disposing existing monitors before starting ${providerKey}`);
+    await disposeClaudeLogMonitor(sessionKey);
+    await disposeCodexLogMonitor(sessionKey);
+    await disposeGeminiLogMonitor(sessionKey);
 
-      bufferCheckInterval = setInterval(() => {
-        const state = sessionState[socket.id];
-        if (!state) {
-          return;
+    if (providerKey === 'claude') {
+      try {
+        console.log('[Socket Connection] Initializing Claude log monitor...');
+        const handshakeDebounceMs = Number.parseInt(socket.handshake.query?.claudeDebounceMs ?? '', 10);
+        const effectiveDebounceMs = Number.isFinite(handshakeDebounceMs) && handshakeDebounceMs >= 0
+          ? handshakeDebounceMs
+          : undefined;
+        const monitor = await setupClaudeLogMonitor({
+          homeDir,
+          workspaceDir,
+          sessionKey,
+          finalizeSession,
+          socket,
+          debounceMs: effectiveDebounceMs
+        });
+        if (monitor) {
+          claudeLogMonitors[sessionKey] = monitor;
+          console.log(`[Socket Connection] Claude log monitor initialized for session: ${sessionKey}`);
+        } else {
+          console.warn('[Socket Connection] Claude log monitor setup returned null');
         }
-
-        // プロンプトが送信されていない場合は監視不要
-        if (!state.responsePending) {
-          return;
-        }
-
-        // ANSIエスケープシーケンスを除去してから検索
-        const cleanBuffer = terminalScreenBuffer.replace(/\x1b\[[0-9;]*m/g, '');
-        const bufferLower = cleanBuffer.toLowerCase();
-        const screenHasEscToInterrupt = bufferLower.includes('esc to interrupt') || bufferLower.includes('esc to cancel');
-
-        // "esc to interrupt"が画面に表示されている場合
-        if (screenHasEscToInterrupt) {
-          if (!state.escToInterruptVisible) {
-            state.escToInterruptVisible = true;
-            state.escToInterruptStartTime = Date.now();
-          }
-          // タイマーをクリア（まだAI応答中）
-          if (state.responseCompleteTimer) {
-            clearTimeout(state.responseCompleteTimer);
-            state.responseCompleteTimer = null;
-          }
-          return;
-        }
-
-        // "esc to interrupt"が消失している場合（認証待ち中は除く）
-        if (state.escToInterruptVisible && !state.awaitingApproval) {
-          // 既存のタイマーをクリア
-          if (state.responseCompleteTimer) {
-            clearTimeout(state.responseCompleteTimer);
-          }
-
-          // 2秒待って、まだ"esc to interrupt"がなければ完了とみなす
-          state.responseCompleteTimer = setTimeout(() => {
-            // 認証待ち状態になっている場合はスキップ
-            if (state.awaitingApproval) {
-              state.responseCompleteTimer = null;
-              return;
-            }
-
-            // 再度バッファをチェック
-            const cleanFinalBuffer = terminalScreenBuffer.replace(/\x1b\[[0-9;]*m/g, '');
-            const finalBufferCheck = cleanFinalBuffer.toLowerCase();
-            const stillHasEscToInterrupt = finalBufferCheck.includes('esc to interrupt') || finalBufferCheck.includes('esc to cancel');
-
-            if (!stillHasEscToInterrupt) {
-              const displayDuration = state.escToInterruptStartTime
-                ? Math.max(0, Date.now() - state.escToInterruptStartTime - 2000)
-                : 0;
-
-              state.escToInterruptVisible = false;
-              state.escToInterruptStartTime = null;
-              state.responseCompleteTimer = null;
-
-              const approvalWaitMs = state.totalApprovalWaitMs || 0;
-              const adjustedDuration = Math.max(0, displayDuration - approvalWaitMs);
-
-              state.actualDurationMs = adjustedDuration;
-              state.totalApprovalWaitMs = 0;
-              state.approvalWaitStartTime = null;
-
-              if (state.responsePending) {
-                finalizeSession({ reason: 'response-complete' }).catch((err) => {
-                  console.error(`Auto-commit error: ${err.message}`);
-                });
-              }
-            } else {
-              state.responseCompleteTimer = null;
-            }
-          }, 2000);
-        }
-      }, 500); // 500ミリ秒ごとにチェック
-    };
-
-    const stopBufferPolling = () => {
-      if (bufferCheckInterval) {
-        clearInterval(bufferCheckInterval);
-        bufferCheckInterval = null;
+      } catch (monitorError) {
+        console.error('[Socket Connection] Failed to initialize Claude log monitor:', monitorError);
       }
-    };
+    } else if (providerKey === 'codex') {
+      try {
+        const handshakeDebounceMs = Number.parseInt(socket.handshake.query?.codexDebounceMs ?? '', 10);
+        const effectiveDebounceMs = Number.isFinite(handshakeDebounceMs) && handshakeDebounceMs >= 0
+          ? handshakeDebounceMs
+          : undefined;
+        const monitor = await setupCodexLogMonitor({
+          homeDir,
+          workspaceDir,
+          sessionKey,
+          finalizeSession,
+          socket,
+          debounceMs: effectiveDebounceMs
+        });
+        if (monitor) {
+          codexLogMonitors[sessionKey] = monitor;
+        }
+      } catch (monitorError) {
+        console.error('Failed to initialize Codex log monitor:', monitorError);
+      }
+    } else if (providerKey === 'gemini') {
+      try {
+        const turnIdleMs = parseDurationPreference({
+          ms: socket.handshake.query?.geminiTurnIdleMs,
+          s: socket.handshake.query?.geminiTurnIdleS,
+          defaultValue: DEFAULT_GEMINI_TURN_IDLE_MS
+        });
+        const sessionIdleMs = parseDurationPreference({
+          ms: socket.handshake.query?.geminiSessionIdleMs,
+          s: socket.handshake.query?.geminiSessionIdleS,
+          defaultValue: DEFAULT_GEMINI_SESSION_IDLE_MS
+        });
+        const monitor = await setupGeminiLogMonitor({
+          homeDir,
+          workspaceDir,
+          sessionKey,
+          finalizeSession,
+          socket,
+          turnIdleMs,
+          sessionIdleMs,
+          projectId,
+          db
+        });
+        if (monitor) {
+          geminiLogMonitors[sessionKey] = monitor;
+        }
+      } catch (monitorError) {
+        console.error('Failed to initialize Gemini log monitor:', monitorError);
+      }
+    }
 
     // Handle PTY spawn event
     ptyProcess.on('spawn', () => {
       socket.emit('output', `\r\n✅ ${providerConfig.displayName} セッションを開始しました\r\n`);
       socket.emit('output', `📁 作業ディレクトリ: ${workspaceDir}\r\n`);
-      startBufferPolling(); // ポーリング開始
     });
 
     const projectKey = getProjectKey(userId, projectId);
 
     async function finalizeSession({ reason }) {
+      console.log(`[finalizeSession] Called with reason: ${reason}, sessionKey: ${socket.id}`);
       const sessionKey = socket.id;
       const state = sessionState[sessionKey];
       if (!state) {
+        console.log(`[finalizeSession] No state found for sessionKey: ${sessionKey}`);
         return;
       }
 
+      console.log(`[finalizeSession] State found. Provider: ${state.provider}, awaitingApproval: ${state.awaitingApproval}`);
+
       if (state.awaitingApproval && !['exit', 'response-complete'].includes(reason)) {
+        console.log(`[finalizeSession] Skipping due to awaiting approval`);
         return;
       }
+
+      // Skip if already processing a commit to avoid race conditions
+      // This must be checked and set BEFORE any await to be atomic
+      if (state.isCommitting) {
+        console.log(`[finalizeSession] Skipping - already processing a commit`);
+        return;
+      }
+      state.isCommitting = true;
 
       if (state.awaitingApproval) {
         endApprovalWait(state);
       }
 
       // タイマーをクリア
-      if (state.responseCompleteTimer) {
-        clearTimeout(state.responseCompleteTimer);
-        state.responseCompleteTimer = null;
-      }
-
       state.responsePending = false;
-      state.escToInterruptVisible = false;
-      state.escToInterruptStartTime = null;
 
       // Claude / Codex / Gemini の場合、履歴ファイルから実際のプロンプトを抽出
       let promptTexts = [];
 
       if (providerKey === 'codex') {
+        // For Codex, read from history.jsonl using the timestamp range of completed prompts (same as Claude)
         try {
           const historyPath = path.join(homeDir, '.codex', 'history.jsonl');
           const historyContent = await fs.readFile(historyPath, 'utf8');
           const lines = historyContent.trim().split('\n');
 
-          // state.promptsに記録されている最初のプロンプトのタイムスタンプを基準にする
-          // もしstate.promptsが空なら、セッション開始時刻の少し前（30秒）から取得
-          let filterStartTime;
-          if (state.prompts.length > 0 && state.prompts[0].startedAt) {
-            // 最初のプロンプトの1秒前から取得（タイミングのズレを吸収）
-            filterStartTime = (state.prompts[0].startedAt - 1000) / 1000;
-          } else {
-            // セッション開始の30秒前から取得（広めに取る）
-            filterStartTime = (state.startTime - 30000) / 1000;
-          }
+          // Use the timestamp range tracked by finalizePrompt
+          const startTime = state.completedPromptStartTime;
+          const endTime = state.completedPromptEndTime;
 
-          for (const line of lines) {
-            try {
-              const entry = JSON.parse(line);
-              if (entry.ts >= filterStartTime && entry.text) {
-                promptTexts.push(entry.text);
+          if (startTime && endTime) {
+            // Add tolerance for timestamp matching (5 seconds before start, 2 seconds after end)
+            // Note: Codex uses seconds, not milliseconds
+            const toleranceStart = (startTime - 5000) / 1000;
+            const toleranceEnd = (endTime + 2000) / 1000;
+            console.log(`[finalizeSession] Reading Codex history.jsonl from ${toleranceStart} (${startTime / 1000} - 5s) to ${toleranceEnd} (${endTime / 1000} + 2s)`);
+
+            for (const line of lines) {
+              try {
+                const entry = JSON.parse(line);
+                const timestamp = entry.ts; // Codex uses 'ts' in seconds
+                const text = entry.text;
+
+                // Only include prompts within the completed range (with tolerance)
+                if (timestamp >= toleranceStart && timestamp <= toleranceEnd && text) {
+                  console.log(`[finalizeSession] Found Codex prompt at ${timestamp}: "${text.substring(0, 50)}..."`);
+                  promptTexts.push(text);
+                }
+              } catch (parseError) {
+                // Skip invalid lines
               }
-            } catch (parseError) {
-              // Skip invalid history lines
             }
           }
+
+          // Reset the timestamp range after reading
+          state.completedPromptStartTime = null;
+          state.completedPromptEndTime = null;
+
+          console.log(`[finalizeSession] Found ${promptTexts.length} prompts from Codex history.jsonl`);
         } catch (readError) {
-          const promptsFromSession = state.prompts || [];
-          promptTexts = promptsFromSession.map(entry => entry.text);
+          console.error('[finalizeSession] Failed to read Codex history.jsonl:', readError);
         }
       } else if (providerKey === 'claude') {
+        // For Claude, read from history.jsonl using the timestamp range of completed prompts
         try {
           const historyPath = path.join(homeDir, '.config', 'claude', 'history.jsonl');
           const historyContent = await fs.readFile(historyPath, 'utf8');
           const lines = historyContent.trim().split('\n');
 
-          let filterStartTimeMs;
-          if (state.prompts.length > 0 && state.prompts[0].startedAt) {
-            filterStartTimeMs = state.prompts[0].startedAt - 1000;
-          } else {
-            filterStartTimeMs = state.startTime - 30000;
-          }
+          // Use the timestamp range tracked by finalizePromptLog
+          const startTime = state.completedPromptStartTime;
+          const endTime = state.completedPromptEndTime;
 
-          for (const line of lines) {
-            try {
-              const entry = JSON.parse(line);
-              let timestamp = entry.timestamp || entry.ts || entry.time || entry.created_at;
-              let text = entry.display || entry.text || entry.prompt || entry.message || entry.content;
+          if (startTime && endTime) {
+            // Add tolerance for timestamp matching (5 seconds before start, 2 seconds after end)
+            const toleranceStart = startTime - 5000;
+            const toleranceEnd = endTime + 2000;
+            console.log(`[finalizeSession] Reading history.jsonl from ${toleranceStart} (${startTime} - 5s) to ${toleranceEnd} (${endTime} + 2s)`);
 
-              if (timestamp >= filterStartTimeMs && text) {
-                promptTexts.push(text);
+            for (const line of lines) {
+              try {
+                const entry = JSON.parse(line);
+                const timestamp = entry.timestamp || entry.ts || entry.time || entry.created_at;
+                const text = entry.display || entry.text || entry.prompt || entry.message || entry.content;
+
+                // Only include prompts within the completed range (with tolerance)
+                if (timestamp >= toleranceStart && timestamp <= toleranceEnd && text) {
+                  console.log(`[finalizeSession] Found prompt at ${timestamp}: "${text.substring(0, 50)}..."`);
+                  promptTexts.push(text);
+                }
+              } catch (parseError) {
+                // Skip invalid lines
               }
-            } catch (parseError) {
-              // Skip invalid lines
             }
           }
 
-          if (promptTexts.length === 0 && state.prompts.length > 0) {
-            const promptsFromSession = state.prompts || [];
-            promptTexts = promptsFromSession.map(entry => entry.text);
-          }
+          // Reset the timestamp range after reading
+          state.completedPromptStartTime = null;
+          state.completedPromptEndTime = null;
+
+          console.log(`[finalizeSession] Found ${promptTexts.length} prompts from history.jsonl`);
         } catch (readError) {
-          const promptsFromSession = state.prompts || [];
-          promptTexts = promptsFromSession.map(entry => entry.text);
+          console.error('[finalizeSession] Failed to read history.jsonl:', readError);
         }
       } else if (providerKey === 'gemini') {
+        // For Gemini, read from logs.json (user prompts only) using the timestamp range of completed prompts (same as Claude/Codex)
         try {
-          const geminiTmpDir = path.join(homeDir, '.gemini', 'tmp');
-          const tmpDirs = await fs.readdir(geminiTmpDir);
+          let logsPath = null;
+          let hashFolder = null;
 
-          let latestLogPath = null;
-          let latestMtime = 0;
+          // First, try to get hash folder from database (persistent mapping)
+          hashFolder = await getGeminiHashFolder(projectId, db);
 
-          for (const hashDir of tmpDirs) {
-            const logsPath = path.join(geminiTmpDir, hashDir, 'logs.json');
-            try {
-              const stats = await fs.stat(logsPath);
-              if (stats.mtimeMs > latestMtime) {
-                latestMtime = stats.mtimeMs;
-                latestLogPath = logsPath;
+          // If not in database, try to get from current monitor session
+          if (!hashFolder) {
+            const monitor = geminiLogMonitors[sessionKey];
+            if (monitor && monitor.currentFilePath) {
+              // Extract hash from currentFilePath: /path/.gemini/tmp/{hash}/chats/session-*.json
+              const match = monitor.currentFilePath.match(/\.gemini\/tmp\/([^\/]+)\//);
+              if (match && match[1]) {
+                hashFolder = match[1];
+                console.log(`[finalizeSession] Using Gemini hash folder from monitor: ${hashFolder}`);
               }
-            } catch (statError) {
-              continue;
             }
+          } else {
+            console.log(`[finalizeSession] Using Gemini hash folder from database: ${hashFolder}`);
           }
 
-          if (latestLogPath) {
-            const logsContent = await fs.readFile(latestLogPath, 'utf8');
-            const logs = JSON.parse(logsContent);
+          if (hashFolder) {
+            logsPath = path.join(homeDir, '.gemini', 'tmp', hashFolder, 'logs.json');
+          } else {
+            console.log(`[finalizeSession] No Gemini hash folder found for project ${projectId}`);
+          }
 
-            let filterStartTimeMs;
-            if (state.prompts.length > 0 && state.prompts[0].startedAt) {
-              filterStartTimeMs = state.prompts[0].startedAt - 1000;
-            } else {
-              filterStartTimeMs = state.startTime - 30000;
-            }
+          if (logsPath) {
+            try {
+              await fs.access(logsPath);
+              console.log(`[finalizeSession] Reading Gemini logs.json: ${logsPath}`);
+              const logsContent = await fs.readFile(logsPath, 'utf8');
+              const logs = JSON.parse(logsContent);
 
-            for (const entry of logs) {
-              if (entry.type === 'user' && entry.message) {
-                const entryTimestamp = new Date(entry.timestamp).getTime();
+              // Use the timestamp range tracked by finalizeTurn
+              const startTime = state.completedPromptStartTime;
+              const endTime = state.completedPromptEndTime;
 
-                if (entryTimestamp >= filterStartTimeMs) {
-                  promptTexts.push(entry.message);
+              if (startTime && endTime) {
+                // Add tolerance for timestamp matching (5 seconds before start, 2 seconds after end)
+                const toleranceStart = startTime - 5000;
+                const toleranceEnd = endTime + 2000;
+                console.log(`[finalizeSession] Reading Gemini logs.json from ${toleranceStart} (${startTime} - 5s) to ${toleranceEnd} (${endTime} + 2s)`);
+
+                // logs.json is an array of user prompts
+                if (Array.isArray(logs)) {
+                  for (const entry of logs) {
+                    if (entry.type === 'user' && entry.message) {
+                      const entryTimestamp = new Date(entry.timestamp).getTime();
+
+                      // Only include prompts within the completed range (with tolerance)
+                      if (entryTimestamp >= toleranceStart && entryTimestamp <= toleranceEnd) {
+                        console.log(`[finalizeSession] Found Gemini prompt at ${entryTimestamp}: "${entry.message.substring(0, 50)}..."`);
+                        promptTexts.push(entry.message);
+                      }
+                    }
+                  }
                 }
               }
+
+              // Reset the timestamp range after reading
+              state.completedPromptStartTime = null;
+              state.completedPromptEndTime = null;
+
+              console.log(`[finalizeSession] Found ${promptTexts.length} prompts from Gemini logs.json`);
+            } catch (accessError) {
+              console.log(`[finalizeSession] Cannot access Gemini logs.json: ${logsPath}`);
             }
+          } else {
+            console.log(`[finalizeSession] No Gemini monitor or currentFilePath available`);
           }
         } catch (readError) {
-          // Fallback to state.prompts if needed
+          console.error('[finalizeSession] Failed to read Gemini logs.json:', readError);
         }
       }
 
@@ -685,12 +2742,14 @@ module.exports = (io) => {
       state.lastPromptStartedAt = null;
 
       const existingPending = pendingPromptsByProject[projectKey] || [];
-      const promptsForCommit = promptTexts.length > 0
-        ? existingPending.concat(promptTexts)
-        : existingPending;
 
-      if (promptsForCommit.length > 0) {
+      // Current prompts from this finalization
+      const currentPrompts = promptTexts.length > 0 ? promptTexts : [];
+
+      if (currentPrompts.length > 0) {
         const providerName = state.provider || providerConfig.displayName;
+        // Commit message includes: pending prompts + current prompts
+        const promptsForCommit = existingPending.concat(currentPrompts);
 
         const runWithIndexLockRetry = async (operation) => {
           try {
@@ -708,16 +2767,23 @@ module.exports = (io) => {
           }
         };
 
-        if (await gitManager.isInitialized()) {
-          try {
-            const status = await gitManager.getStatus();
+        try {
+          const isGitInitialized = await gitManager.isInitialized();
+          console.log(`[finalizeSession] Git initialized: ${isGitInitialized}, gitManager.projectPath: ${gitManager.projectPath}`);
+
+          if (isGitInitialized) {
+            try {
+              const status = await gitManager.getStatus();
+              console.log(`[finalizeSession] Git status:`, JSON.stringify(status, null, 2));
 
             if (!status?.hasChanges) {
-              pendingPromptsByProject[projectKey] = promptsForCommit;
+              console.log(`[finalizeSession] No changes detected, accumulating current prompts to pending`);
+              // Add current prompts to pending (accumulate)
+              pendingPromptsByProject[projectKey] = existingPending.concat(currentPrompts);
               socket.emit('commit_notification', {
                 status: 'info',
                 provider: providerName,
-                count: promptsForCommit.length,
+                count: currentPrompts.length,
                 durationMs,
                 message: 'コード差分が無かったためコミットは保留されました。次回の変更時にまとめてコミットします。'
               });
@@ -725,8 +2791,8 @@ module.exports = (io) => {
             }
 
             await runWithIndexLockRetry(() => gitManager.addFile('.'));
-
             const commitMessage = buildCommitMessage(promptsForCommit, providerName);
+            console.log(`[finalizeSession] Committing with ${existingPending.length} pending + ${currentPrompts.length} current prompts`);
 
             const commitResult = await runWithIndexLockRetry(() => gitManager.commit(
               commitMessage,
@@ -735,14 +2801,17 @@ module.exports = (io) => {
             ));
 
             if (commitResult.success) {
+              console.log(`[finalizeSession] Commit successful! Hash: ${commitResult.commitHash}`);
               commitPromptStore[commitResult.commitHash] = {
                 projectId,
                 prompts: promptsForCommit.slice()
               };
+              // Clear pending prompts after successful commit
               delete pendingPromptsByProject[projectKey];
               const durationLabel = typeof durationMs === 'number'
                 ? formatDuration(durationMs)
                 : '前回保留分';
+              console.log(`[finalizeSession] Emitting commit_notification (success) and save_complete`);
               socket.emit('commit_notification', {
                 status: 'success',
                 provider: providerName,
@@ -798,6 +2867,13 @@ module.exports = (io) => {
             message: 'トリップコードが未初期化のため、プロンプトを保留しました'
           });
         }
+        } finally {
+          // Clear the committing flag
+          state.isCommitting = false;
+        }
+      } else {
+        // No prompts to commit, clear the flag
+        state.isCommitting = false;
       }
 
       delete sessionState[sessionKey];
@@ -824,6 +2900,9 @@ module.exports = (io) => {
         if (inputBuffers[socket.id]) {
           delete inputBuffers[socket.id];
         }
+        await disposeClaudeLogMonitor(sessionKey);
+        await disposeCodexLogMonitor(sessionKey);
+        await disposeGeminiLogMonitor(sessionKey);
       }
 
       const reasonParts = [];
@@ -842,75 +2921,7 @@ module.exports = (io) => {
     ptyProcess.on('data', (data) => {
       const rawText = data.toString();
       const lowerText = rawText.toLowerCase();
-
-      // ターミナル画面バッファを更新
-      terminalScreenBuffer += rawText;
-      if (terminalScreenBuffer.length > MAX_BUFFER_SIZE) {
-        terminalScreenBuffer = terminalScreenBuffer.slice(-MAX_BUFFER_SIZE);
-      }
-
-      // 画面バッファ全体で"esc to interrupt"/"esc to cancel"の有無をチェック
       const state = sessionState[socket.id];
-      if (state) {
-        // ANSIエスケープシーケンスを除去してから検索
-        const cleanBuffer = terminalScreenBuffer.replace(/\x1b\[[0-9;]*m/g, '');
-        const bufferLower = cleanBuffer.toLowerCase();
-
-        const screenHasEscToInterrupt = bufferLower.includes('esc to interrupt') || bufferLower.includes('esc to cancel');
-
-        if (screenHasEscToInterrupt) {
-          if (!state.escToInterruptVisible) {
-            state.escToInterruptVisible = true;
-            state.escToInterruptStartTime = Date.now();
-          }
-
-          // タイマーをクリア（まだAI応答中）
-          if (state.responseCompleteTimer) {
-            clearTimeout(state.responseCompleteTimer);
-            state.responseCompleteTimer = null;
-          }
-        } else if (state.escToInterruptVisible && !state.awaitingApproval) {
-          if (state.responseCompleteTimer) {
-            clearTimeout(state.responseCompleteTimer);
-          }
-
-          state.responseCompleteTimer = setTimeout(() => {
-            if (state.awaitingApproval) {
-              state.responseCompleteTimer = null;
-              return;
-            }
-
-            const cleanFinalBuffer = terminalScreenBuffer.replace(/\x1b\[[0-9;]*m/g, '');
-            const finalBufferCheck = cleanFinalBuffer.toLowerCase();
-            const stillHasEscToInterrupt = finalBufferCheck.includes('esc to interrupt') || finalBufferCheck.includes('esc to cancel');
-
-            if (!stillHasEscToInterrupt) {
-              const displayDuration = state.escToInterruptStartTime
-                ? Math.max(0, Date.now() - state.escToInterruptStartTime - 2000)
-                : 0;
-
-              state.escToInterruptVisible = false;
-              state.escToInterruptStartTime = null;
-              state.responseCompleteTimer = null;
-
-              const approvalWaitMs = state.totalApprovalWaitMs || 0;
-              const adjustedDuration = Math.max(0, displayDuration - approvalWaitMs);
-
-              state.actualDurationMs = adjustedDuration;
-              state.totalApprovalWaitMs = 0;
-              state.approvalWaitStartTime = null;
-
-              if (state.responsePending) {
-                finalizeSession({ reason: 'response-complete' }).catch((err) => {
-                  console.error(`Auto-commit error: ${err.message}`);
-                });
-              }
-            } else {
-              state.responseCompleteTimer = null;
-            }
-          }, 2000);
-        }
-      }
 
       // Claude Code auth code detection
       if (providerKey === 'claude') {
@@ -1143,10 +3154,6 @@ module.exports = (io) => {
             continue;
           }
 
-          if (state.completionTimer) {
-            clearTimeout(state.completionTimer);
-            state.completionTimer = null;
-          }
           const nowTs = Date.now();
           if (state.prompts.length === 0) {
             state.startTime = nowTs;
@@ -1175,19 +3182,6 @@ module.exports = (io) => {
           // 意味のある内容がない場合（空文字列や数字のみ）はプロンプトとして記録しない
           if (cleaned.length === 0 || /^[0-9\s]+$/.test(cleaned)) {
             continue;
-          }
-
-          // 新しいプロンプト送信時は、escToInterruptVisibleをリセット
-          // これにより、次に「esc to interrupt」が表示されるまで自動コミットは発火しない
-          state.escToInterruptVisible = false;
-          state.escToInterruptStartTime = null;
-
-          // 画面バッファもクリア（新しいプロンプトなので過去の画面状態は不要）
-          terminalScreenBuffer = '';
-
-          if (state.responseCompleteTimer) {
-            clearTimeout(state.responseCompleteTimer);
-            state.responseCompleteTimer = null;
           }
 
           state.prompts.push({
@@ -1228,8 +3222,6 @@ module.exports = (io) => {
 
     // Handle disconnect
     socket.on('disconnect', () => {
-      stopBufferPolling(); // ポーリング停止
-
       if (terminals[socket.id]) {
         try {
           terminals[socket.id].kill();
@@ -1241,6 +3233,15 @@ module.exports = (io) => {
       if (inputBuffers[socket.id]) {
         delete inputBuffers[socket.id];
       }
+      disposeClaudeLogMonitor(socket.id).catch((error) => {
+        console.error('Failed to dispose Claude monitor on disconnect:', error);
+      });
+      disposeCodexLogMonitor(socket.id).catch((error) => {
+        console.error('Failed to dispose Codex monitor on disconnect:', error);
+      });
+      disposeGeminiLogMonitor(socket.id).catch((error) => {
+        console.error('Failed to dispose Gemini monitor on disconnect:', error);
+      });
     });
   });
 };

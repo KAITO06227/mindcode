@@ -9,7 +9,9 @@
       "Bash(rm:*)",
       "Read(/Users/skmtkit/Desktop/guitaradot/claude/**)",
       "Read(/Users/skmtkit/Desktop/guitaradot/claude/public/**)",
-      "Read(/Users/skmtkit/Desktop/guitaradot/claude/public/**)"
+      "Read(/Users/skmtkit/Desktop/guitaradot/claude/public/**)",
+      "Bash(cat:*)",
+      "Bash(awk:*)"
     ],
     "deny": []
   }
