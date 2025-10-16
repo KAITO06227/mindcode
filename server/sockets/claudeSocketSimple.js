@@ -85,7 +85,6 @@ const DEFAULT_GEMINI_SESSION_IDLE_MS = (() => {
   }
   return 5000;
 })();
-
 function parseDurationPreference({ ms, s, defaultValue }) {
   const msValue = ms !== undefined ? Number.parseFloat(ms) : undefined;
   if (Number.isFinite(msValue) && msValue >= 0) {
@@ -133,6 +132,23 @@ function generateClaudeProjectSlugCandidates(homeDir, workspaceDir) {
   }
 
   return candidates;
+}
+
+function extractUniquePromptTexts(prompts) {
+  if (!Array.isArray(prompts) || prompts.length === 0) {
+    return [];
+  }
+  const seen = new Set();
+  const results = [];
+  for (const entry of prompts) {
+    const text = typeof entry?.text === 'string' ? entry.text.trim() : '';
+    if (!text || seen.has(text)) {
+      continue;
+    }
+    seen.add(text);
+    results.push(text);
+  }
+  return results;
 }
 
 function parseTimestamp(value) {
@@ -230,6 +246,25 @@ function extractAssistantText(entry) {
   pushTextCandidate(texts, entry?.output_text);
   pushTextCandidate(texts, entry?.content);
   pushTextCandidate(texts, message?.result);
+
+  const payload = entry?.payload;
+  if (payload && typeof payload === 'object') {
+    pushTextCandidate(texts, payload.text);
+    pushTextCandidate(texts, payload.result);
+    const payloadContent = Array.isArray(payload.content) ? payload.content : [];
+    for (const part of payloadContent) {
+      if (!part) {
+        continue;
+      }
+      if (typeof part.text === 'string') {
+        pushTextCandidate(texts, part.text);
+      } else if (typeof part.value === 'string') {
+        pushTextCandidate(texts, part.value);
+      } else if (part.output_text) {
+        pushTextCandidate(texts, part.output_text);
+      }
+    }
+  }
 
   if (texts.length === 0) {
     return null;
@@ -1199,8 +1234,6 @@ async function setupCodexLogMonitor({
       }
       if (reason === 'session-switch' || reason === 'dispose') {
         finalizePrompt(prompt);
-      } else if (reason === 'new-user-message') {
-        finalizePrompt(prompt);
       }
     }
   }
@@ -1254,17 +1287,27 @@ async function setupCodexLogMonitor({
     }
 
     linkPromptState(prompt);
-    prompt.lastEventTimestamp = parseTimestamp(entry.timestamp);
+    const entryTimestamp = parseTimestamp(entry.timestamp);
+    prompt.lastEventTimestamp = entryTimestamp;
     const textValue = extractAssistantText(entry);
-    const stopReason = getStopReason(entry);
-    const shouldSkipDebounce = stopReason === 'end_turn' || stopReason === 'stop_sequence';
     const hasText = typeof textValue === 'string' && textValue.length > 0;
 
     if (hasText) {
       prompt.latestAssistantText = textValue;
-      prompt.latestAssistantTimestamp = parseTimestamp(entry.timestamp);
+      prompt.latestAssistantTimestamp = entryTimestamp;
       prompt.status = 'text_ready';
       monitor.lastActivityTs = Date.now();
+
+      const payload = entry?.payload ?? {};
+      const finalizeImmediately = payload.type === 'message' && payload.role === 'assistant';
+
+      if (finalizeImmediately) {
+        finalizePrompt(prompt);
+        return;
+      }
+
+      const stopReason = getStopReason(entry);
+      const shouldSkipDebounce = stopReason === 'end_turn' || stopReason === 'stop_sequence';
       startPromptDebounce(prompt, shouldSkipDebounce ? 0 : undefined);
     }
   }
@@ -1643,7 +1686,8 @@ async function setupGeminiLogMonitor({
     fileCheckInterval: 5000, // Check for new files every 5 seconds
     projectId,
     db,
-    sessionStartTime: Date.now() // Track session start time to filter old files
+    sessionStartTime: Date.now(), // Track session start time to filter old files
+    messageStates: new Map()
   };
 
   if (containerWorkspaceDir) {
@@ -1684,6 +1728,8 @@ async function setupGeminiLogMonitor({
   }
 
   function finalizeActiveTurn(reason) {
+    monitor.messageStates.clear();
+
     const turn = monitor.activeTurn;
     if (!turn || turn.completed) {
       monitor.activeTurn = null;
@@ -1776,9 +1822,7 @@ async function setupGeminiLogMonitor({
       }
     }
 
-    if (monitor.activeTurn) {
-      finalizeActiveTurn('next-user');
-    }
+    monitor.messageStates.clear();
 
     monitor.activeTurn = {
       id: randomUUID(),
@@ -1803,7 +1847,7 @@ async function setupGeminiLogMonitor({
     linkTurnState(monitor.activeTurn);
   }
 
-  function updateGeminiResponse(message) {
+  function updateGeminiResponse(message, messageIndex) {
     const turn = monitor.activeTurn;
     if (!turn) {
       return;
@@ -1815,6 +1859,41 @@ async function setupGeminiLogMonitor({
     turn.lastActivityMs = timestampMs;
     monitor.lastActivityMs = Math.max(monitor.lastActivityMs, timestampMs);
     monitor.lastFileUpdatedMs = Math.max(monitor.lastFileUpdatedMs, timestampMs);
+
+    const messageKey = typeof message?.id === 'string' && message.id.length > 0
+      ? `id:${message.id}`
+      : `index:${messageIndex}`;
+
+    const previousState = monitor.messageStates.get(messageKey);
+    const hasTokens = !!(message?.tokens && typeof message.tokens === 'object');
+    const hasModel = typeof message?.model === 'string' && message.model.length > 0;
+    const hasToolCalls = Array.isArray(message?.toolCalls) && message.toolCalls.length > 0;
+    const isFinalPayload = hasTokens && hasModel && !hasToolCalls;
+
+    const tokensPreviouslySeen = previousState?.hasTokens ?? false;
+    const modelPreviouslySeen = previousState?.hasModel ?? false;
+    const finalizedPreviously = previousState?.finalized ?? false;
+    const sawTokensBeforeModel = (previousState?.seenTokensWithoutModel ?? false) || (hasTokens && !hasModel);
+
+    monitor.messageStates.set(messageKey, {
+      hasTokens,
+      hasModel,
+      finalized: finalizedPreviously,
+      seenTokensWithoutModel: sawTokensBeforeModel
+    });
+
+    const newlyCompletedFromUpdate = isFinalPayload && !modelPreviouslySeen && (tokensPreviouslySeen || sawTokensBeforeModel);
+    const newlyCompletedOnFirstObservation = isFinalPayload && !tokensPreviouslySeen && !modelPreviouslySeen && !finalizedPreviously;
+
+    if (!finalizedPreviously && (newlyCompletedFromUpdate || newlyCompletedOnFirstObservation)) {
+      monitor.messageStates.set(messageKey, {
+        hasTokens,
+        hasModel,
+        finalized: true,
+        seenTokensWithoutModel: sawTokensBeforeModel
+      });
+      finalizeActiveTurn('gemini-response-complete');
+    }
   }
 
   async function safeReadDir(target) {
@@ -1917,6 +1996,7 @@ async function setupGeminiLogMonitor({
         monitor.activeTurn = null;
         monitor.lastFileUpdatedMs = 0;
         monitor.lastUserMessage = null;
+        monitor.messageStates.clear();
 
         // Extract and save hash folder mapping to database
         const match = latestPath.match(/\.gemini\/tmp\/([^\/]+)\//);
@@ -1948,6 +2028,7 @@ async function setupGeminiLogMonitor({
       monitor.skippedFiles.add(monitor.currentFilePath);
       monitor.currentFilePath = null;
       monitor.lastProcessedIndex = -1;
+      monitor.messageStates.clear();
       return;
     }
 
@@ -1971,6 +2052,7 @@ async function setupGeminiLogMonitor({
       monitor.skippedFiles.add(monitor.currentFilePath);
       monitor.currentFilePath = null;
       monitor.lastProcessedIndex = -1;
+      monitor.messageStates.clear();
       monitor.activeTurn = null;
       monitor.lastUserMessage = null;
       return;
@@ -1992,7 +2074,7 @@ async function setupGeminiLogMonitor({
       if (type === 'user') {
         startNewTurn(message);
       } else if (type === 'gemini') {
-        updateGeminiResponse(message);
+        updateGeminiResponse(message, i);
       }
 
       const messageTs = parseTimestamp(message?.timestamp);
@@ -2001,6 +2083,12 @@ async function setupGeminiLogMonitor({
     }
 
     if (messages.length > 0) {
+      if (monitor.lastProcessedIndex === messages.length - 1) {
+        const lastMessage = messages[messages.length - 1];
+        if (lastMessage?.type === 'gemini') {
+          updateGeminiResponse(lastMessage, messages.length - 1);
+        }
+      }
       monitor.lastProcessedIndex = messages.length - 1;
     }
 
@@ -2011,6 +2099,7 @@ async function setupGeminiLogMonitor({
 
   monitor.dispose = async () => {
     monitor.disposed = true;
+    monitor.messageStates.clear();
     if (monitor.pollTimer) {
       clearInterval(monitor.pollTimer);
       monitor.pollTimer = null;
@@ -2722,6 +2811,14 @@ module.exports = (io) => {
         }
       }
 
+      if (providerKey === 'codex' && promptTexts.length === 0) {
+        const fallbackPrompts = extractUniquePromptTexts(state.prompts);
+        if (fallbackPrompts.length > 0) {
+          console.log('[finalizeSession] Using Codex session prompts as fallback because history.jsonl was empty during assistant completion');
+          promptTexts = fallbackPrompts;
+        }
+      }
+
       // actualDurationMsが設定されていればそれを使用（2秒の待機時間を引いた正確な時間）
       // 設定されていなければ従来通りの計算
       let durationMs = state.actualDurationMs !== null && state.actualDurationMs !== undefined
@@ -2905,7 +3002,9 @@ module.exports = (io) => {
       sessionClosed = true;
 
       try {
-        await finalizeSession({ reason: 'exit' });
+        if (providerKey === 'claude') {
+          await finalizeSession({ reason: 'exit' });
+        }
       } catch (finalizeError) {
         socket.emit(
           'output',
