@@ -1642,7 +1642,8 @@ async function setupGeminiLogMonitor({
     lastFileCheckTime: 0,
     fileCheckInterval: 5000, // Check for new files every 5 seconds
     projectId,
-    db
+    db,
+    sessionStartTime: Date.now() // Track session start time to filter old files
   };
 
   if (containerWorkspaceDir) {
@@ -1825,14 +1826,22 @@ async function setupGeminiLogMonitor({
   }
 
   async function selectLatestSessionFile() {
+    console.log(`[Gemini Monitor] Scanning for log files created after session start`);
+    console.log(`[Gemini Monitor] Session start time: ${monitor.sessionStartTime} (${new Date(monitor.sessionStartTime).toISOString()})`);
+    console.log(`[Gemini Monitor] Last user message time: ${monitor.lastUserMessage?.timestamp || 'none'}`);
+
     let latestPath = null;
     let latestMtime = 0;
+    // Allow 2 seconds tolerance for file creation timing (same as Claude)
+    const minTimestamp = (monitor.lastUserMessage?.timestamp || monitor.sessionStartTime) - 2000;
 
     const hashEntries = await safeReadDir(geminiTmpRoot);
     const hashDirs = hashEntries
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort((a, b) => b.localeCompare(a));
+
+    console.log(`[Gemini Monitor] Found ${hashDirs.length} hash directories`);
 
     for (const hash of hashDirs) {
       const chatsDir = path.join(geminiTmpRoot, hash, 'chats');
@@ -1842,6 +1851,8 @@ async function setupGeminiLogMonitor({
         .map((entry) => entry.name)
         .sort((a, b) => b.localeCompare(a));
 
+      console.log(`[Gemini Monitor] Found ${files.length} session files in hash ${hash}`);
+
       for (const fileName of files) {
         const fullPath = path.join(chatsDir, fileName);
         if (monitor.skippedFiles.has(fullPath)) {
@@ -1850,19 +1861,26 @@ async function setupGeminiLogMonitor({
         let stats;
         try {
           stats = await fs.stat(fullPath);
+          console.log(`[Gemini Monitor] File: ${fileName}, mtime: ${stats.mtimeMs}, created after threshold (with 2s tolerance): ${stats.mtimeMs >= minTimestamp}`);
         } catch {
           continue;
         }
 
-        if (stats.mtimeMs > latestMtime) {
+        // Only consider files created around the last user message (with 2s tolerance) or after session start
+        if (stats.mtimeMs >= minTimestamp && stats.mtimeMs > latestMtime) {
           latestMtime = stats.mtimeMs;
           latestPath = fullPath;
         }
       }
 
       if (latestPath) {
+        console.log(`[Gemini Monitor] Selected latest file: ${latestPath}`);
         return latestPath;
       }
+    }
+
+    if (!latestPath) {
+      console.log('[Gemini Monitor] No valid session file found created after session start or last user message');
     }
 
     return latestPath;
