@@ -12,6 +12,8 @@ const { resolveExistingProjectPath } = require('../utils/userWorkspace');
 const router = express.Router();
 const { emitFileTreeUpdate } = require('../sockets/fileTreeEvents');
 
+const SYSTEM_FILE_NAMES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitkeep']);
+
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: async (req, file, cb) => {
@@ -33,8 +35,7 @@ const upload = multer({
   },
   fileFilter: (req, file, cb) => {
     // システムファイルを事前にフィルタリング
-    const systemFiles = ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitkeep'];
-    if (systemFiles.includes(file.originalname)) {
+    if (SYSTEM_FILE_NAMES.has(file.originalname)) {
       return cb(null, false); // ファイルをスキップ（エラーにしない）
     }
 
@@ -765,7 +766,43 @@ router.post('/:projectId/upload', verifyToken, requireProjectAccess('editor'), u
   try {
     const { projectId } = req.params;
     const targetPath = req.body.targetPath || '';
-    const relativePaths = req.body.relativePaths || [];
+    let relativePaths = [];
+
+    if (req.body.relativePaths) {
+      if (Array.isArray(req.body.relativePaths)) {
+        relativePaths = req.body.relativePaths;
+      } else if (typeof req.body.relativePaths === 'string') {
+        try {
+          const parsed = JSON.parse(req.body.relativePaths);
+          if (Array.isArray(parsed)) {
+            relativePaths = parsed;
+          } else if (parsed !== undefined) {
+            relativePaths = [parsed];
+          }
+        } catch {
+          relativePaths = [req.body.relativePaths];
+        }
+      }
+    }
+
+    relativePaths = relativePaths.reduce((acc, relPath) => {
+      if (typeof relPath !== 'string') {
+        return acc;
+      }
+
+      if (!relPath) {
+        acc.push('');
+        return acc;
+      }
+
+      const baseName = path.basename(relPath);
+      if (SYSTEM_FILE_NAMES.has(baseName)) {
+        return acc;
+      }
+
+      acc.push(relPath);
+      return acc;
+    }, []);
 
     // Get project owner info for file system path
     const [projects] = await db.execute(
@@ -783,15 +820,39 @@ router.post('/:projectId/upload', verifyToken, requireProjectAccess('editor'), u
     const createdFolders = new Set();
     const projectPath = await resolveExistingProjectPath(projectOwner, projectId);
 
-    for (let i = 0; i < req.files.length; i++) {
-      const file = req.files[i];
-      const relativePath = Array.isArray(relativePaths) ? relativePaths[i] : relativePaths;
+    let filesToProcess = req.files;
+    if (relativePaths.length === req.files.length && req.files.length > 0) {
+      const remaining = [...req.files];
+      const ordered = [];
+
+      for (const relativePath of relativePaths) {
+        const expectedName = relativePath ? path.basename(relativePath) : null;
+        let matchIndex = -1;
+
+        if (expectedName) {
+          matchIndex = remaining.findIndex(file => file.originalname === expectedName);
+        }
+
+        if (matchIndex === -1) {
+          matchIndex = 0;
+        }
+
+        ordered.push(remaining.splice(matchIndex, 1)[0]);
+      }
+
+      if (ordered.length === req.files.length && remaining.length === 0) {
+        filesToProcess = ordered;
+      }
+    }
+
+    for (let i = 0; i < filesToProcess.length; i++) {
+      const file = filesToProcess[i];
+      const relativePath = relativePaths[i] ?? '';
 
       try {
         // システムファイルはMulterのfileFilterで既にフィルタ済み
         // ただし念のため追加チェック
-        const systemFiles = ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitkeep'];
-        if (systemFiles.includes(file.originalname) || systemFiles.includes(file.filename)) {
+        if (SYSTEM_FILE_NAMES.has(file.originalname) || SYSTEM_FILE_NAMES.has(file.filename)) {
           console.log(`Skipping system file: ${file.originalname || file.filename}`);
           try {
             await fs.unlink(file.path);
@@ -1130,8 +1191,7 @@ router.post('/:projectId/sync', verifyToken, requireProjectAccess('editor'), asy
           const relativeFilePath = relativePath ? path.join(relativePath, entry.name) : entry.name;
 
           // Skip hidden files, system files, and node_modules
-          const systemFiles = ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitkeep'];
-          if (entry.name.startsWith('.') || entry.name === 'node_modules' || systemFiles.includes(entry.name)) {
+          if (entry.name.startsWith('.') || entry.name === 'node_modules' || SYSTEM_FILE_NAMES.has(entry.name)) {
             continue;
           }
           

@@ -3,6 +3,28 @@ import ReactDOM from 'react-dom';
 import styled from 'styled-components';
 import { FiX, FiFile, FiFolder, FiUpload } from 'react-icons/fi';
 
+const SYSTEM_FILE_NAMES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
+
+const isSystemFile = (file) => {
+  const name = file?.name || '';
+  if (SYSTEM_FILE_NAMES.has(name)) {
+    return true;
+  }
+
+  const relativePath = file?.webkitRelativePath || '';
+  if (relativePath) {
+    const parts = relativePath.split('/');
+    const lastPart = parts[parts.length - 1] || '';
+    if (SYSTEM_FILE_NAMES.has(lastPart)) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const filterSystemFiles = (files) => files.filter(file => !isSystemFile(file));
+
 const ModalOverlay = styled.div`
   position: fixed;
   top: 0;
@@ -224,7 +246,7 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
   if (!isOpen) return null;
 
   const handleFileSelect = (event) => {
-    const files = Array.from(event.target.files);
+    const files = filterSystemFiles(Array.from(event.target.files));
     setSelectedFiles(files);
   };
 
@@ -340,7 +362,9 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
               value: path + file.name,
               writable: false
             });
-            files.push(file);
+            if (!isSystemFile(file)) {
+              files.push(file);
+            }
             resolve();
           });
         });
@@ -393,13 +417,19 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
         for (let i = 0; i < droppedFiles.length; i++) {
           if (!processedIndices.has(i)) {
             console.log('フォールバックで追加:', droppedFiles[i].name);
-            files.push(droppedFiles[i]);
+            if (!isSystemFile(droppedFiles[i])) {
+              files.push(droppedFiles[i]);
+            }
           }
         }
       } else {
         // フォールバック: 通常のFileオブジェクトとして処理
         console.log('フォールバック: dataTransfer.files使用');
-        files.push(...droppedFiles);
+        droppedFiles.forEach(file => {
+          if (!isSystemFile(file)) {
+            files.push(file);
+          }
+        });
       }
 
       console.log('最終的なfiles配列の長さ:', files.length);
@@ -411,13 +441,15 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
         return;
       }
 
-      if (files.length > 0) {
+      const filteredFiles = filterSystemFiles(files);
+
+      if (filteredFiles.length > 0) {
         // 既存のファイルに追加（重複チェック）
         setSelectedFiles(prevFiles => {
           const existingPaths = new Set(
             prevFiles.map(f => f.webkitRelativePath || f.name)
           );
-          const newFiles = files.filter(
+          const newFiles = filteredFiles.filter(
             f => !existingPaths.has(f.webkitRelativePath || f.name)
           );
           console.log('既存ファイル数:', prevFiles.length);

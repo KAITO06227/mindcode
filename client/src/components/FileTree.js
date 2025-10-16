@@ -351,16 +351,13 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
       const targetPath = getTargetPath();
 
       const formData = new FormData();
+      const relativePaths = [];
       files.forEach(file => {
         formData.append('files', file);
         // webkitRelativePathがある場合（フォルダアップロード）、それも送信
-        if (file.webkitRelativePath) {
-          formData.append('relativePaths', file.webkitRelativePath);
-        } else {
-          // 通常のファイルアップロードの場合は空文字列
-          formData.append('relativePaths', '');
-        }
+        relativePaths.push(file.webkitRelativePath || '');
       });
+      formData.append('relativePaths', JSON.stringify(relativePaths));
 
       // Add target path to form data
       formData.append('targetPath', targetPath);
