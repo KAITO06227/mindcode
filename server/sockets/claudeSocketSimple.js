@@ -71,9 +71,6 @@ function ensureSessionState(sessionKey, defaultProvider) {
       startTime: Date.now(),
       prompts: [],
       provider: defaultProvider,
-      awaitingApproval: false,
-      approvalWaitStartTime: null,
-      totalApprovalWaitMs: 0,
       lastPromptStartedAt: null,
       responsePending: false,
       finalizedPromptIds: new Set(),
@@ -85,27 +82,6 @@ function ensureSessionState(sessionKey, defaultProvider) {
   return sessionState[sessionKey];
 }
 
-function beginApprovalWait(state) {
-  if (!state || state.awaitingApproval) {
-    return;
-  }
-  state.awaitingApproval = true;
-  state.approvalWaitStartTime = Date.now();
-}
-
-function endApprovalWait(state) {
-  if (!state || !state.awaitingApproval) {
-    return;
-  }
-  if (typeof state.approvalWaitStartTime === 'number') {
-    const elapsed = Date.now() - state.approvalWaitStartTime;
-    if (Number.isFinite(elapsed) && elapsed > 0) {
-      state.totalApprovalWaitMs = (state.totalApprovalWaitMs || 0) + elapsed;
-    }
-  }
-  state.awaitingApproval = false;
-  state.approvalWaitStartTime = null;
-}
 
 function getProjectKey(userId, projectId) {
   return `${userId}:${projectId}`;
@@ -453,7 +429,6 @@ module.exports = (io) => {
     initialState.provider = providerConfig.displayName;
 
     // Dispose existing monitors when switching providers
-    console.log(`[Socket Connection] Disposing existing monitors before starting ${providerKey}`);
     await disposeClaudeLogMonitor(claudeLogMonitors[sessionKey]);
     await disposeCodexLogMonitor(codexLogMonitors[sessionKey]);
     await disposeGeminiLogMonitor(geminiLogMonitors[sessionKey]);
@@ -463,7 +438,6 @@ module.exports = (io) => {
 
     if (providerKey === 'claude') {
       try {
-        console.log('[Socket Connection] Initializing Claude log monitor...');
         const handshakeDebounceMs = Number.parseInt(socket.handshake.query?.claudeDebounceMs ?? '', 10);
         const effectiveDebounceMs = Number.isFinite(handshakeDebounceMs) && handshakeDebounceMs >= 0
           ? handshakeDebounceMs
@@ -479,12 +453,9 @@ module.exports = (io) => {
         });
         if (monitor) {
           claudeLogMonitors[sessionKey] = monitor;
-          console.log(`[Socket Connection] Claude log monitor initialized for session: ${sessionKey}`);
-        } else {
-          console.warn('[Socket Connection] Claude log monitor setup returned null');
         }
       } catch (monitorError) {
-        console.error('[Socket Connection] Failed to initialize Claude log monitor:', monitorError);
+        // Monitor initialization failed - session will continue without log monitoring
       }
     } else if (providerKey === 'codex') {
       try {
@@ -505,7 +476,7 @@ module.exports = (io) => {
           codexLogMonitors[sessionKey] = monitor;
         }
       } catch (monitorError) {
-        console.error('Failed to initialize Codex log monitor:', monitorError);
+        // Monitor initialization failed - session will continue without log monitoring
       }
     } else if (providerKey === 'gemini') {
       try {
@@ -535,7 +506,7 @@ module.exports = (io) => {
           geminiLogMonitors[sessionKey] = monitor;
         }
       } catch (monitorError) {
-        console.error('Failed to initialize Gemini log monitor:', monitorError);
+        // Monitor initialization failed - session will continue without log monitoring
       }
     }
 
@@ -548,32 +519,18 @@ module.exports = (io) => {
     const projectKey = getProjectKey(userId, projectId);
 
     async function finalizeSession({ reason }) {
-      console.log(`[finalizeSession] Called with reason: ${reason}, sessionKey: ${socket.id}`);
       const sessionKey = socket.id;
       const state = sessionState[sessionKey];
       if (!state) {
-        console.log(`[finalizeSession] No state found for sessionKey: ${sessionKey}`);
-        return;
-      }
-
-      console.log(`[finalizeSession] State found. Provider: ${state.provider}, awaitingApproval: ${state.awaitingApproval}`);
-
-      if (state.awaitingApproval && !['exit', 'response-complete'].includes(reason)) {
-        console.log(`[finalizeSession] Skipping due to awaiting approval`);
         return;
       }
 
       // Skip if already processing a commit to avoid race conditions
       // This must be checked and set BEFORE any await to be atomic
       if (state.isCommitting) {
-        console.log(`[finalizeSession] Skipping - already processing a commit`);
         return;
       }
       state.isCommitting = true;
-
-      if (state.awaitingApproval) {
-        endApprovalWait(state);
-      }
 
       // タイマーをクリア
       state.responsePending = false;
@@ -597,7 +554,6 @@ module.exports = (io) => {
             // Note: Codex uses seconds, not milliseconds
             const toleranceStart = (startTime - 5000) / 1000;
             const toleranceEnd = (endTime + 2000) / 1000;
-            console.log(`[finalizeSession] Reading Codex history.jsonl from ${toleranceStart} (${startTime / 1000} - 5s) to ${toleranceEnd} (${endTime / 1000} + 2s)`);
 
             for (const line of lines) {
               try {
@@ -607,7 +563,6 @@ module.exports = (io) => {
 
                 // Only include prompts within the completed range (with tolerance)
                 if (timestamp >= toleranceStart && timestamp <= toleranceEnd && text) {
-                  console.log(`[finalizeSession] Found Codex prompt at ${timestamp}: "${text.substring(0, 50)}..."`);
                   promptTexts.push(text);
                 }
               } catch (parseError) {
@@ -619,10 +574,8 @@ module.exports = (io) => {
           // Reset the timestamp range after reading
           state.completedPromptStartTime = null;
           state.completedPromptEndTime = null;
-
-          console.log(`[finalizeSession] Found ${promptTexts.length} prompts from Codex history.jsonl`);
         } catch (readError) {
-          console.error('[finalizeSession] Failed to read Codex history.jsonl:', readError);
+          // Failed to read Codex history - will use fallback
         }
       } else if (providerKey === 'claude') {
         // For Claude, read from history.jsonl using the timestamp range of completed prompts
@@ -639,7 +592,6 @@ module.exports = (io) => {
             // Add tolerance for timestamp matching (5 seconds before start, 2 seconds after end)
             const toleranceStart = startTime - 5000;
             const toleranceEnd = endTime + 2000;
-            console.log(`[finalizeSession] Reading history.jsonl from ${toleranceStart} (${startTime} - 5s) to ${toleranceEnd} (${endTime} + 2s)`);
 
             for (const line of lines) {
               try {
@@ -649,7 +601,6 @@ module.exports = (io) => {
 
                 // Only include prompts within the completed range (with tolerance)
                 if (timestamp >= toleranceStart && timestamp <= toleranceEnd && text) {
-                  console.log(`[finalizeSession] Found prompt at ${timestamp}: "${text.substring(0, 50)}..."`);
                   promptTexts.push(text);
                 }
               } catch (parseError) {
@@ -661,10 +612,8 @@ module.exports = (io) => {
           // Reset the timestamp range after reading
           state.completedPromptStartTime = null;
           state.completedPromptEndTime = null;
-
-          console.log(`[finalizeSession] Found ${promptTexts.length} prompts from history.jsonl`);
         } catch (readError) {
-          console.error('[finalizeSession] Failed to read history.jsonl:', readError);
+          // Failed to read Claude history
         }
       } else if (providerKey === 'gemini') {
         // For Gemini, read from logs.json (user prompts only) using the timestamp range of completed prompts (same as Claude/Codex)
@@ -683,23 +632,17 @@ module.exports = (io) => {
               const match = monitor.currentFilePath.match(/\.gemini\/tmp\/([^\/]+)\//);
               if (match && match[1]) {
                 hashFolder = match[1];
-                console.log(`[finalizeSession] Using Gemini hash folder from monitor: ${hashFolder}`);
               }
             }
-          } else {
-            console.log(`[finalizeSession] Using Gemini hash folder from database: ${hashFolder}`);
           }
 
           if (hashFolder) {
             logsPath = path.join(homeDir, '.gemini', 'tmp', hashFolder, 'logs.json');
-          } else {
-            console.log(`[finalizeSession] No Gemini hash folder found for project ${projectId}`);
           }
 
           if (logsPath) {
             try {
               await fs.access(logsPath);
-              console.log(`[finalizeSession] Reading Gemini logs.json: ${logsPath}`);
               const logsContent = await fs.readFile(logsPath, 'utf8');
               const logs = JSON.parse(logsContent);
 
@@ -711,7 +654,6 @@ module.exports = (io) => {
                 // Add tolerance for timestamp matching (5 seconds before start, 2 seconds after end)
                 const toleranceStart = startTime - 5000;
                 const toleranceEnd = endTime + 2000;
-                console.log(`[finalizeSession] Reading Gemini logs.json from ${toleranceStart} (${startTime} - 5s) to ${toleranceEnd} (${endTime} + 2s)`);
 
                 // logs.json is an array of user prompts
                 if (Array.isArray(logs)) {
@@ -721,7 +663,6 @@ module.exports = (io) => {
 
                       // Only include prompts within the completed range (with tolerance)
                       if (entryTimestamp >= toleranceStart && entryTimestamp <= toleranceEnd) {
-                        console.log(`[finalizeSession] Found Gemini prompt at ${entryTimestamp}: "${entry.message.substring(0, 50)}..."`);
                         promptTexts.push(entry.message);
                       }
                     }
@@ -732,23 +673,18 @@ module.exports = (io) => {
               // Reset the timestamp range after reading
               state.completedPromptStartTime = null;
               state.completedPromptEndTime = null;
-
-              console.log(`[finalizeSession] Found ${promptTexts.length} prompts from Gemini logs.json`);
             } catch (accessError) {
-              console.log(`[finalizeSession] Cannot access Gemini logs.json: ${logsPath}`);
+              // Cannot access Gemini logs
             }
-          } else {
-            console.log(`[finalizeSession] No Gemini monitor or currentFilePath available`);
           }
         } catch (readError) {
-          console.error('[finalizeSession] Failed to read Gemini logs.json:', readError);
+          // Failed to read Gemini logs
         }
       }
 
       if (providerKey === 'codex' && promptTexts.length === 0) {
         const fallbackPrompts = extractUniquePromptTexts(state.prompts);
         if (fallbackPrompts.length > 0) {
-          console.log('[finalizeSession] Using Codex session prompts as fallback because history.jsonl was empty during assistant completion');
           promptTexts = fallbackPrompts;
         }
       }
@@ -761,14 +697,6 @@ module.exports = (io) => {
           ? Math.max(0, Date.now() - (state.prompts[state.prompts.length - 1].startedAt || state.startTime))
           : null);
 
-      if (typeof durationMs === 'number') {
-        const approvalWaitMs = state.totalApprovalWaitMs || 0;
-        if (approvalWaitMs > 0) {
-          durationMs = Math.max(0, durationMs - approvalWaitMs);
-        }
-      }
-      state.totalApprovalWaitMs = 0;
-      state.approvalWaitStartTime = null;
 
       // プロンプトログをデータベースに保存
       // すべてのプロバイダ（Claude / Codex / Gemini）で履歴ファイルから取得したプロンプトを保存
@@ -808,7 +736,7 @@ module.exports = (io) => {
               try {
                 await gitManager.clearIndexLock();
               } catch (lockError) {
-                console.error('Lock cleanup failed:', lockError);
+                // Lock cleanup failed
               }
               return await operation();
             }
@@ -818,15 +746,12 @@ module.exports = (io) => {
 
         try {
           const isGitInitialized = await gitManager.isInitialized();
-          console.log(`[finalizeSession] Git initialized: ${isGitInitialized}, gitManager.projectPath: ${gitManager.projectPath}`);
 
           if (isGitInitialized) {
             try {
               const status = await gitManager.getStatus();
-              console.log(`[finalizeSession] Git status:`, JSON.stringify(status, null, 2));
 
             if (!status?.hasChanges) {
-              console.log(`[finalizeSession] No changes detected, accumulating current prompts to pending`);
               // Add current prompts to pending (accumulate)
               pendingPromptsByProject[projectKey] = existingPending.concat(currentPrompts);
               socket.emit('commit_notification', {
@@ -841,7 +766,6 @@ module.exports = (io) => {
 
             await runWithIndexLockRetry(() => gitManager.addFile('.'));
             const commitMessage = buildCommitMessage(promptsForCommit, providerName);
-            console.log(`[finalizeSession] Committing with ${existingPending.length} pending + ${currentPrompts.length} current prompts`);
 
             const commitResult = await runWithIndexLockRetry(() => gitManager.commit(
               commitMessage,
@@ -850,7 +774,6 @@ module.exports = (io) => {
             ));
 
             if (commitResult.success) {
-              console.log(`[finalizeSession] Commit successful! Hash: ${commitResult.commitHash}`);
               commitPromptStore[commitResult.commitHash] = {
                 projectId,
                 prompts: promptsForCommit.slice()
@@ -860,7 +783,6 @@ module.exports = (io) => {
               const durationLabel = typeof durationMs === 'number'
                 ? formatDuration(durationMs)
                 : '前回保留分';
-              console.log(`[finalizeSession] Emitting commit_notification (success) and save_complete`);
               socket.emit('commit_notification', {
                 status: 'success',
                 provider: providerName,
@@ -1106,41 +1028,6 @@ module.exports = (io) => {
       }
 
       socket.emit('output', rawText);
-
-      // Approval detection (state must exist)
-      if (state) {
-        // ANSIエスケープシーケンスを削除してからチェック
-        const cleanText = rawText.replace(/\x1b\[[0-9;]*m/g, '');
-        const cleanLower = cleanText.toLowerCase();
-
-        const approvalPatterns = [
-          'allow command?',
-          'approval required',
-          'always approve this session',
-          'always yes',
-          'use arrow keys',
-          'select an option',
-          'waiting for user confirmation',
-          '1. yes',
-          '2. yes, allow all edits',
-          '3. no, and tell claude'
-        ];
-
-        const normalizedChoicePrefix = cleanText.replace(/^[^\x1b]*\x1b\[[0-9;]*m/g, '').trim();
-        const patternMatched = approvalPatterns.some(pattern => cleanLower.includes(pattern));
-        const choiceMatched = normalizedChoicePrefix.startsWith('│ ❯ 1. yes') || normalizedChoicePrefix.startsWith('│   1. yes');
-
-        if (patternMatched || choiceMatched) {
-          beginApprovalWait(state);
-          return;
-        }
-
-        if (state.awaitingApproval && /press enter/.test(cleanLower)) {
-          endApprovalWait(state);
-          state.responsePending = true;
-          return;
-        }
-      }
     });
 
     ptyProcess.on('exit', handleProcessExit);
@@ -1166,11 +1053,6 @@ module.exports = (io) => {
       }
       inputBuffers[socket.id] += stringData;
 
-      if (currentState.awaitingApproval && stringData.includes('\r')) {
-        endApprovalWait(currentState);
-        currentState.responsePending = true;
-      }
-
       const containsCR = stringData.includes('\r');
       const containsLF = stringData.includes('\n');
 
@@ -1182,10 +1064,6 @@ module.exports = (io) => {
           let cleaned = normalizeTerminalInput(segment);
 
           if (cleaned.length === 0) {
-            if (state.awaitingApproval) {
-              endApprovalWait(state);
-              state.responsePending = true;
-            }
             continue;
           }
 
@@ -1211,16 +1089,6 @@ module.exports = (io) => {
           const nowTs = Date.now();
           if (state.prompts.length === 0) {
             state.startTime = nowTs;
-          }
-          const normalizedText = cleaned.trim().toLowerCase();
-          const approvalResponses = new Set([
-            'y', 'yes', 'n', 'no', 'a', 'always', 'always yes',
-            '1', '2', '3', 'cancel', 'esc', 'shift+tab'
-          ]);
-
-          if (state.awaitingApproval && approvalResponses.has(normalizedText)) {
-            endApprovalWait(state);
-            continue;
           }
 
           // Claude認証コード入力中はプロンプトとして記録しない
@@ -1287,14 +1155,14 @@ module.exports = (io) => {
       if (inputBuffers[socket.id]) {
         delete inputBuffers[socket.id];
       }
-      disposeClaudeLogMonitor(claudeLogMonitors[socket.id]).catch((error) => {
-        console.error('Failed to dispose Claude monitor on disconnect:', error);
+      disposeClaudeLogMonitor(claudeLogMonitors[socket.id]).catch(() => {
+        // Monitor disposal failed
       });
-      disposeCodexLogMonitor(codexLogMonitors[socket.id]).catch((error) => {
-        console.error('Failed to dispose Codex monitor on disconnect:', error);
+      disposeCodexLogMonitor(codexLogMonitors[socket.id]).catch(() => {
+        // Monitor disposal failed
       });
-      disposeGeminiLogMonitor(geminiLogMonitors[socket.id]).catch((error) => {
-        console.error('Failed to dispose Gemini monitor on disconnect:', error);
+      disposeGeminiLogMonitor(geminiLogMonitors[socket.id]).catch(() => {
+        // Monitor disposal failed
       });
       delete claudeLogMonitors[socket.id];
       delete codexLogMonitors[socket.id];
@@ -1302,28 +1170,5 @@ module.exports = (io) => {
     });
   });
 };
-
-// Helper function retained for backwards compatibility in case other modules import it
-async function checkClaudeAvailability() {
-  return new Promise((resolve) => {
-    const testProcess = spawn('claude', ['--version'], {
-      stdio: 'pipe',
-      shell: true
-    });
-
-    testProcess.on('close', (code) => {
-      resolve(code === 0);
-    });
-
-    testProcess.on('error', () => {
-      resolve(false);
-    });
-
-    setTimeout(() => {
-      testProcess.kill();
-      resolve(false);
-    }, 3000);
-  });
-}
 
 module.exports.commitPromptStore = commitPromptStore;
