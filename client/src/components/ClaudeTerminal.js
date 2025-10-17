@@ -196,6 +196,16 @@ const ClaudeTerminal = ({ projectId, userToken, onCommitNotification }) => {
       // Auto-sync after commit notification (indicates AI operation completed)
       console.log('[ClaudeTerminal] Triggering auto-sync after commit notification');
       autoSyncAfterAI();
+
+      // If no changes were detected (status: 'info'), the files might still be writing to disk
+      // Wait a bit and sync again to catch delayed file writes (especially for Codex)
+      if (payload?.status === 'info' && payload?.message?.includes('保留')) {
+        console.log('[ClaudeTerminal] No changes detected, will retry sync after 2 seconds for delayed file writes');
+        setTimeout(() => {
+          console.log('[ClaudeTerminal] Retrying auto-sync after delay');
+          autoSyncAfterAI();
+        }, 2000);
+      }
     };
 
     socket.on('commit_notification', handleCommitNotificationEvent);
