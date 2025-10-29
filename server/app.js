@@ -7,9 +7,15 @@ require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+
+// CORS configuration based on environment
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? [process.env.CLIENT_URL || 'https://minecode.si.aoyama.ac.jp']
+  : ['http://localhost:3000', 'http://localhost:3001'];
+
 const io = socketIo(server, {
   cors: {
-    origin: ['http://localhost:3000', 'http://localhost:3001'],
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true
   }
@@ -19,19 +25,19 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  origin: allowedOrigins,
   credentials: true
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static files only in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/build')));
-}
-
 // Database connection
 const db = require('./database/connection');
+
+// Health check endpoint for Docker (must be before other routes)
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
 
 // Routes
 const authRoutes = require('./routes/auth');
@@ -70,8 +76,11 @@ invitationSocket(io);
 // Make io accessible in routes
 app.set('io', io);
 
-// Serve React app for all other routes (only in production)
+// Serve static files only in production (must be after API routes)
 if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../client/build')));
+
+  // Serve React app for all non-API routes
   app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../client/build/index.html'));
   });

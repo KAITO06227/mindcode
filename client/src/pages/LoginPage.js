@@ -56,26 +56,6 @@ const GoogleButton = styled.a`
   }
 `;
 
-const Features = styled.div`
-  margin-top: 40px;
-  text-align: left;
-`;
-
-const Feature = styled.div`
-  display: flex;
-  align-items: center;
-  margin-bottom: 12px;
-  color: #cccccc;
-  font-size: 14px;
-
-  &::before {
-    content: '✓';
-    color: #4caf50;
-    margin-right: 12px;
-    font-weight: bold;
-  }
-`;
-
 const ErrorMessage = styled.div`
   background-color: #f44336;
   color: white;
@@ -103,7 +83,11 @@ const LoginPage = () => {
 
   const handleGoogleLogin = () => {
     setErrorMessage('');
-    const authUrl = 'http://localhost:3001/api/auth/google';
+    // 本番環境（minecode.si.aoyama.ac.jp）では相対パス、開発環境ではlocalhost
+    const isProduction = window.location.hostname === 'minecode.si.aoyama.ac.jp';
+    const authUrl = isProduction
+      ? '/api/auth/google'
+      : 'http://localhost:3001/api/auth/google';
     window.location.href = authUrl;
   };
 
@@ -124,15 +108,6 @@ const LoginPage = () => {
           </svg>
           Googleアカウントでログイン
         </GoogleButton>
-
-        <Features>
-          <Feature>シンタックスハイライト付きモナコエディタ</Feature>
-          <Feature>ライブプレビュー機能</Feature>
-          <Feature>トリップコード統合バージョン管理</Feature>
-          <Feature>Claude Code AI支援</Feature>
-          <Feature>ファイル・フォルダ管理</Feature>
-          <Feature>教師用管理パネル</Feature>
-        </Features>
       </LoginCard>
     </LoginContainer>
   );

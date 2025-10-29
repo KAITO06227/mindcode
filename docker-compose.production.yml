@@ -1,0 +1,83 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: minecode-app
+    command: npm start
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: 3306
+    volumes:
+      # ユーザープロジェクトデータの永続化
+      - ./user_projects:/app/user_projects
+      # AI CLI設定ファイルの共有
+      - ./AI.md:/app/AI.md:ro
+      - ./.minecode:/app/.minecode:ro
+    ports:
+      - "127.0.0.1:3001:3001"  # 外部公開せず、localhostのみバインド
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: mysql:8.0
+    container_name: minecode-mysql
+    env_file:
+      - .env.production
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      # データベースデータの永続化
+      - mysql_data:/var/lib/mysql
+      # 初期化スクリプト
+      - ./server/database/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./server/database/file_system_schema.sql:/docker-entrypoint-initdb.d/02-file_system_schema.sql
+      - ./server/database/multi_user_schema.sql:/docker-entrypoint-initdb.d/03-multi_user_schema.sql
+      # MySQL設定ファイル（本番環境用）
+      - ./mysql/my.cnf:/etc/mysql/conf.d/custom.cnf:ro
+    ports:
+      - "127.0.0.1:3306:3306"  # 外部公開せず、localhostのみバインド
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max_connections=200
+      - --innodb_buffer_pool_size=256M
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  default:
+    name: minecode-network

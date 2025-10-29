@@ -1,6 +1,3 @@
--- ファイル保存システム用拡張DBスキーマ
-USE webide;
-
 -- 拡張されたproject_filesテーブル（メタデータとバージョン管理対応）
 DROP TABLE IF EXISTS project_files;
 CREATE TABLE project_files (

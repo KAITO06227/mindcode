@@ -1,0 +1,69 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main  # mainブランチへのプッシュで自動デプロイ
+
+jobs:
+  deploy:
+    name: Deploy to minecode.si.aoyama.ac.jp
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H minecode.si.aoyama.ac.jp >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        env:
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_HOST: minecode.si.aoyama.ac.jp
+        run: |
+          # サーバー上のディレクトリにコードをデプロイ
+          ssh $SERVER_USER@$SERVER_HOST << 'ENDSSH'
+            set -e
+            cd /var/www/minecode
+
+            # 最新のコードを取得
+            git fetch origin
+            git reset --hard origin/main
+
+            # クライアントを再ビルド
+            cd client
+            npm install
+            NODE_ENV=production npm run build
+
+            # パーミッション修正
+            cd ..
+            sudo chmod -R o+rX /var/www/minecode/client/build
+
+            # Dockerコンテナを再ビルド＆再起動
+            docker-compose --env-file .env.production -f docker-compose.production.yml build --no-cache web
+            docker-compose --env-file .env.production -f docker-compose.production.yml up -d --force-recreate web
+
+            # ヘルスチェック
+            sleep 10
+            curl -f http://localhost:3001/api/health || echo "Warning: Health check failed"
+
+            echo "Deployment completed successfully!"
+          ENDSSH
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ $? -eq 0 ]; then
+            echo "✅ Deployment successful"
+          else
+            echo "❌ Deployment failed"
+            exit 1
+          fi

@@ -1,6 +1,3 @@
-CREATE DATABASE IF NOT EXISTS webide;
-USE webide;
-
 -- Users table (unchanged)
 CREATE TABLE IF NOT EXISTS users (
   id INT AUTO_INCREMENT PRIMARY KEY,

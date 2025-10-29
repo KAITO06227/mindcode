@@ -1,9 +1,6 @@
 -- Gemini project to hash folder mapping
 -- This table maps project IDs to their corresponding Gemini hash folders
 -- ensuring consistent log file reading across sessions
-
-USE webide;
-
 CREATE TABLE IF NOT EXISTS gemini_project_folders (
   id INT AUTO_INCREMENT PRIMARY KEY,
   project_id VARCHAR(36) NOT NULL UNIQUE,

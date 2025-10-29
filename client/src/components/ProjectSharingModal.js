@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom';
 import styled from 'styled-components';
 import { FiX, FiUserPlus, FiUsers, FiMail, FiTrash2 } from 'react-icons/fi';
-import axios from 'axios';
+import api from '../utils/api';
 
 const ModalOverlay = styled.div`
   position: fixed;
@@ -326,10 +326,7 @@ const ProjectSharingModal = ({ isOpen, onClose, projectId, currentUserRole }) =>
 
   const fetchMembers = async () => {
     try {
-      const token = localStorage.getItem('token');
-      const response = await axios.get(`http://localhost:3001/api/projects/${projectId}/members`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const response = await api.get(`/api/projects/${projectId}/members`);
       setMembers(response.data.members || []);
     } catch (error) {
       console.error('Failed to fetch members:', error);
@@ -339,10 +336,7 @@ const ProjectSharingModal = ({ isOpen, onClose, projectId, currentUserRole }) =>
 
   const fetchInvitations = async () => {
     try {
-      const token = localStorage.getItem('token');
-      const response = await axios.get(`http://localhost:3001/api/projects/${projectId}/invitations`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const response = await api.get(`/api/projects/${projectId}/invitations`);
       setInvitations(response.data.invitations || []);
     } catch (error) {
       console.error('Failed to fetch invitations:', error);
@@ -361,15 +355,11 @@ const ProjectSharingModal = ({ isOpen, onClose, projectId, currentUserRole }) =>
 
     setLoading(true);
     try {
-      const token = localStorage.getItem('token');
-      await axios.post(
-        `http://localhost:3001/api/projects/${projectId}/invitations`,
+      await api.post(
+        `/api/projects/${projectId}/invitations`,
         {
           email: inviteEmail,
           role: 'viewer'  // デフォルトでviewer（実質的にeditorと同等の権限）
-        },
-        {
-          headers: { Authorization: `Bearer ${token}` }
         }
       );
 
@@ -388,13 +378,7 @@ const ProjectSharingModal = ({ isOpen, onClose, projectId, currentUserRole }) =>
     if (!window.confirm('この招待を削除しますか？')) return;
 
     try {
-      const token = localStorage.getItem('token');
-      await axios.delete(
-        `http://localhost:3001/api/projects/${projectId}/invitations/${invitationId}`,
-        {
-          headers: { Authorization: `Bearer ${token}` }
-        }
-      );
+      await api.delete(`/api/projects/${projectId}/invitations/${invitationId}`);
       setSuccess('招待を削除しました');
       fetchInvitations();
     } catch (error) {
@@ -407,13 +391,7 @@ const ProjectSharingModal = ({ isOpen, onClose, projectId, currentUserRole }) =>
     if (!window.confirm('このメンバーを削除しますか？')) return;
 
     try {
-      const token = localStorage.getItem('token');
-      await axios.delete(
-        `http://localhost:3001/api/projects/${projectId}/members/${userId}`,
-        {
-          headers: { Authorization: `Bearer ${token}` }
-        }
-      );
+      await api.delete(`/api/projects/${projectId}/members/${userId}`);
       setSuccess('メンバーを削除しました');
       fetchMembers();
     } catch (error) {
