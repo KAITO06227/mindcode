@@ -22,13 +22,19 @@ jobs:
       - name: Add server to known hosts
         run: |
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           ssh-keyscan -H minecode.si.aoyama.ac.jp >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
 
       - name: Deploy to server
         env:
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_HOST: minecode.si.aoyama.ac.jp
         run: |
+          # SSH接続テスト
+          echo "Testing SSH connection to $SERVER_USER@$SERVER_HOST"
+          ssh -v $SERVER_USER@$SERVER_HOST 'echo "SSH connection successful"'
+
           # サーバー上のディレクトリにコードをデプロイ
           ssh $SERVER_USER@$SERVER_HOST << 'ENDSSH'
             set -e
