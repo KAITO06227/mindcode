@@ -23,8 +23,16 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          ssh-keyscan -H minecode.si.aoyama.ac.jp >> ~/.ssh/known_hosts
-          chmod 644 ~/.ssh/known_hosts
+          echo "Attempting to scan host keys..."
+          ssh-keyscan -H minecode.si.aoyama.ac.jp >> ~/.ssh/known_hosts || echo "ssh-keyscan failed, trying alternative method"
+          # Alternative: add host key manually
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "Using StrictHostKeyChecking=accept-new"
+            echo "Host minecode.si.aoyama.ac.jp" >> ~/.ssh/config
+            echo "  StrictHostKeyChecking accept-new" >> ~/.ssh/config
+            chmod 600 ~/.ssh/config
+          fi
+          chmod 644 ~/.ssh/known_hosts || true
 
       - name: Deploy to server
         env:

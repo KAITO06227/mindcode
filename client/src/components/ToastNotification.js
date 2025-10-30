@@ -90,6 +90,13 @@ const ToastMeta = styled.div`
 const ToastNotification = ({ invitation, onClose, autoClose = 5000 }) => {
   const [isClosing, setIsClosing] = React.useState(false);
 
+  const handleClose = React.useCallback(() => {
+    setIsClosing(true);
+    setTimeout(() => {
+      onClose();
+    }, 300); // アニメーション時間と一致
+  }, [onClose]);
+
   useEffect(() => {
     if (autoClose > 0) {
       const timer = setTimeout(() => {
@@ -98,14 +105,7 @@ const ToastNotification = ({ invitation, onClose, autoClose = 5000 }) => {
 
       return () => clearTimeout(timer);
     }
-  }, [autoClose]);
-
-  const handleClose = () => {
-    setIsClosing(true);
-    setTimeout(() => {
-      onClose();
-    }, 300); // アニメーション時間と一致
-  };
+  }, [autoClose, handleClose]);
 
   return (
     <ToastContainer $isClosing={isClosing}>
