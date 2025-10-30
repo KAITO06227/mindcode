@@ -14,6 +14,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Copy production environment file
+        run: |
+          cp /var/www/minecode/.env.production .env.production
+          echo "✓ Copied .env.production from /var/www/minecode"
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
