@@ -36,8 +36,10 @@ jobs:
 
       - name: Stop existing containers
         run: |
-          docker-compose --env-file .env.production -f docker-compose.production.yml down || true
-          echo "✓ Stopped existing containers"
+          # 既存のコンテナを名前で明示的に停止・削除
+          docker stop minecode-web minecode-mysql 2>/dev/null || true
+          docker rm minecode-web minecode-mysql 2>/dev/null || true
+          echo "✓ Stopped and removed existing containers"
 
       - name: Rebuild and restart Docker containers
         run: |
