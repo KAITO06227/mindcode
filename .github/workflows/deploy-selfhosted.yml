@@ -1,0 +1,46 @@
+name: Deploy to Production (Self-hosted)
+
+on:
+  push:
+    branches:
+      - main  # mainブランチへのプッシュで自動デプロイ
+
+jobs:
+  deploy:
+    name: Deploy to minecode.si.aoyama.ac.jp
+    runs-on: self-hosted  # Self-hosted runnerを使用
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Build client
+        run: |
+          cd client
+          npm install
+          NODE_ENV=production npm run build
+
+      - name: Fix permissions
+        run: |
+          sudo chmod -R o+rX /var/www/minecode/client/build
+
+      - name: Rebuild and restart Docker containers
+        run: |
+          docker-compose --env-file .env.production -f docker-compose.production.yml build --no-cache web
+          docker-compose --env-file .env.production -f docker-compose.production.yml up -d --force-recreate web
+
+      - name: Health check
+        run: |
+          sleep 10
+          curl -f http://localhost:3001/api/health || (echo "Health check failed" && exit 1)
+
+      - name: Show deployment status
+        if: success()
+        run: |
+          echo "✅ Deployment successful!"
+          docker-compose --env-file .env.production -f docker-compose.production.yml ps
