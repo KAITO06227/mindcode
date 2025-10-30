@@ -34,10 +34,15 @@ jobs:
         run: |
           sudo chmod -R o+rX /var/www/minecode/client/build
 
+      - name: Stop existing containers
+        run: |
+          docker-compose --env-file .env.production -f docker-compose.production.yml down || true
+          echo "✓ Stopped existing containers"
+
       - name: Rebuild and restart Docker containers
         run: |
           docker-compose --env-file .env.production -f docker-compose.production.yml build --no-cache web
-          docker-compose --env-file .env.production -f docker-compose.production.yml up -d --force-recreate web
+          docker-compose --env-file .env.production -f docker-compose.production.yml up -d
 
       - name: Health check
         run: |
