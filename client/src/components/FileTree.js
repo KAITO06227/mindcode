@@ -106,6 +106,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
   const [expandedFolders, setExpandedFolders] = useState(new Set(['']));
   const [editingItem, setEditingItem] = useState(null);
   const [newItemName, setNewItemName] = useState('');
+  // selectedItem: 操作対象（新規作成、削除、リネームなど）のアイテム
   const [selectedItem, setSelectedItem] = useState(null);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const socketRef = useRef(null);
@@ -188,10 +189,10 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
 
   const handleItemClick = (item, event) => {
     event.stopPropagation();
-    
+
     // Always update selected item for toolbar operations
     setSelectedItem(item);
-    
+
     if (item.type === 'folder') {
       const newExpanded = new Set(expandedFolders);
       if (expandedFolders.has(item.path)) {
@@ -203,6 +204,20 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
     } else {
       // For files, also update the file editor selection
       onFileSelect(item);
+    }
+  };
+
+  // 空部分クリック時: プロジェクトルートを選択
+  const handleEmptyAreaClick = (event) => {
+    // TreeContainer自体がクリックされた場合のみ（子要素のバブリングは除外）
+    if (event.target === event.currentTarget) {
+      // プロジェクトルートを表すダミーアイテムを選択
+      setSelectedItem({
+        type: 'folder',
+        path: '',
+        name: 'プロジェクトルート',
+        id: null
+      });
     }
   };
 
@@ -652,6 +667,7 @@ const FileTree = ({ fileTree, selectedFile, onFileSelect, projectId, onTreeUpdat
 
       <TreeContainer
         $isRootDropTarget={dragOverPath === '__ROOT__'}
+        onClick={handleEmptyAreaClick}
         onDragOver={handleRootDragOver}
         onDragLeave={handleRootDragLeave}
         onDrop={handleRootDrop}
