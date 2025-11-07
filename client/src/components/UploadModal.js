@@ -76,35 +76,35 @@ const CloseButton = styled.button`
   }
 `;
 
-const UploadTypeContainer = styled.div`
+const SelectButtonContainer = styled.div`
   display: flex;
-  gap: 1rem;
+  gap: 0.5rem;
   margin-bottom: 1.5rem;
 `;
 
-const UploadTypeButton = styled.button`
+const SelectButton = styled.button`
   flex: 1;
-  padding: 1rem;
-  background-color: ${props => props.$selected ? '#007acc' : '#3c3c3c'};
-  border: 2px solid ${props => props.$selected ? '#007acc' : '#555555'};
-  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  background-color: #007acc;
+  border: none;
+  border-radius: 4px;
   color: #ffffff;
   cursor: pointer;
   display: flex;
-  flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 0.5rem;
+  font-size: 0.875rem;
   transition: all 0.2s;
 
-  &:hover {
-    background-color: ${props => props.$selected ? '#007acc' : '#4a4a4a'};
-    border-color: ${props => props.$selected ? '#007acc' : '#666666'};
+  &:hover:not(:disabled) {
+    background-color: #005a9e;
   }
-`;
 
-const UploadTypeLabel = styled.span`
-  font-size: 1rem;
-  font-weight: 500;
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 `;
 
 const FileInputArea = styled.div`
@@ -235,7 +235,6 @@ const Button = styled.button`
 `;
 
 const UploadModal = ({ isOpen, onClose, onUpload }) => {
-  const [uploadType, setUploadType] = useState('file'); // 'file' or 'folder'
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -247,15 +246,24 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
 
   const handleFileSelect = (event) => {
     const files = filterSystemFiles(Array.from(event.target.files));
-    setSelectedFiles(files);
+    // 既存ファイルに追加
+    setSelectedFiles(prevFiles => {
+      const existingPaths = new Set(
+        prevFiles.map(f => f.webkitRelativePath || f.name)
+      );
+      const newFiles = files.filter(
+        f => !existingPaths.has(f.webkitRelativePath || f.name)
+      );
+      return [...prevFiles, ...newFiles];
+    });
   };
 
-  const handleUploadAreaClick = () => {
-    if (uploadType === 'file') {
-      fileInputRef.current?.click();
-    } else {
-      folderInputRef.current?.click();
-    }
+  const handleFileButtonClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFolderButtonClick = () => {
+    folderInputRef.current?.click();
   };
 
   const handleUpload = async () => {
@@ -298,14 +306,7 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
     setSelectedFiles([]);
     setUploadProgress(0);
     setIsUploading(false);
-    setUploadType('file');
     onClose();
-  };
-
-  const handleTypeChange = (type) => {
-    setUploadType(type);
-    setSelectedFiles([]);
-    setUploadProgress(0);
   };
 
   const handleRemoveFile = (index) => {
@@ -435,12 +436,6 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
       console.log('最終的なfiles配列の長さ:', files.length);
       console.log('files配列:', files);
 
-      // ファイルタイプで、かつフォルダがドロップされた場合は警告
-      if (uploadType === 'file' && files.some(f => f.webkitRelativePath && f.webkitRelativePath.includes('/'))) {
-        alert('フォルダをアップロードするには、「フォルダ」タブを選択してください');
-        return;
-      }
-
       const filteredFiles = filterSystemFiles(files);
 
       if (filteredFiles.length > 0) {
@@ -480,43 +475,34 @@ const UploadModal = ({ isOpen, onClose, onUpload }) => {
           </CloseButton>
         </ModalHeader>
 
-        <UploadTypeContainer>
-          <UploadTypeButton
-            $selected={uploadType === 'file'}
-            onClick={() => handleTypeChange('file')}
+        <SelectButtonContainer>
+          <SelectButton
+            onClick={handleFileButtonClick}
             disabled={isUploading}
           >
-            <FiFile size={32} />
-            <UploadTypeLabel>ファイル</UploadTypeLabel>
-          </UploadTypeButton>
-          <UploadTypeButton
-            $selected={uploadType === 'folder'}
-            onClick={() => handleTypeChange('folder')}
+            <FiFile size={18} />
+            ファイルを選択
+          </SelectButton>
+          <SelectButton
+            onClick={handleFolderButtonClick}
             disabled={isUploading}
           >
-            <FiFolder size={32} />
-            <UploadTypeLabel>フォルダ</UploadTypeLabel>
-          </UploadTypeButton>
-        </UploadTypeContainer>
+            <FiFolder size={18} />
+            フォルダを選択
+          </SelectButton>
+        </SelectButtonContainer>
 
         <FileInputArea
-          onClick={handleUploadAreaClick}
           $isDragging={isDragging}
         >
           <FiUpload size={48} color="#007acc" />
           <FileInputText>
             {isDragging
-              ? uploadType === 'file'
-                ? 'ファイルをドロップしてください'
-                : 'フォルダをドロップしてください'
-              : uploadType === 'file'
-              ? 'クリックまたはドラッグ&ドロップでファイルを選択'
-              : 'クリックまたはドラッグ&ドロップでフォルダを選択'}
+              ? 'ファイル/フォルダをドロップしてください'
+              : 'または、ドラッグ&ドロップでファイル/フォルダを追加'}
           </FileInputText>
           <FileInputText style={{ fontSize: '0.75rem', color: '#999999' }}>
-            {uploadType === 'file'
-              ? '複数ファイルの選択が可能です'
-              : 'フォルダ構造がそのまま保持されます'}
+            複数のファイルやフォルダを同時に選択できます
           </FileInputText>
         </FileInputArea>
 
