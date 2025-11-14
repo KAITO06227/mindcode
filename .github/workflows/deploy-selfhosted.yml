@@ -13,20 +13,20 @@ jobs:
     steps:
       - name: Backup user_projects directory
         run: |
-          if [ -d "user_projects" ]; then
-            sudo mv user_projects /tmp/user_projects_backup || true
+          WORK_DIR="${GITHUB_WORKSPACE}"
+          if [ -d "${WORK_DIR}/user_projects" ]; then
+            sudo mv "${WORK_DIR}/user_projects" /tmp/user_projects_backup_${GITHUB_RUN_ID} || true
             echo "✓ Backed up user_projects directory"
           fi
 
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          clean: false  # リポジトリのクリーンアップを無効化
 
       - name: Restore user_projects directory
         run: |
-          if [ -d "/tmp/user_projects_backup" ]; then
-            sudo mv /tmp/user_projects_backup user_projects || true
+          WORK_DIR="${GITHUB_WORKSPACE}"
+          if [ -d "/tmp/user_projects_backup_${GITHUB_RUN_ID}" ]; then
+            sudo mv /tmp/user_projects_backup_${GITHUB_RUN_ID} "${WORK_DIR}/user_projects" || true
             echo "✓ Restored user_projects directory"
           fi
 
@@ -34,21 +34,6 @@ jobs:
         run: |
           cp /var/www/minecode/.env.production .env.production
           echo "✓ Copied .env.production from /var/www/minecode"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Build client
-        run: |
-          cd client
-          npm install
-          NODE_ENV=production npm run build
-
-      - name: Fix permissions
-        run: |
-          sudo chmod -R o+rX /var/www/minecode/client/build
 
       - name: Stop existing containers
         run: |
