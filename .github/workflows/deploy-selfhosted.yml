@@ -11,8 +11,24 @@ jobs:
     runs-on: self-hosted  # Self-hosted runnerを使用
 
     steps:
+      - name: Backup user_projects directory
+        run: |
+          if [ -d "user_projects" ]; then
+            sudo mv user_projects /tmp/user_projects_backup || true
+            echo "✓ Backed up user_projects directory"
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          clean: false  # リポジトリのクリーンアップを無効化
+
+      - name: Restore user_projects directory
+        run: |
+          if [ -d "/tmp/user_projects_backup" ]; then
+            sudo mv /tmp/user_projects_backup user_projects || true
+            echo "✓ Restored user_projects directory"
+          fi
 
       - name: Copy production environment file
         run: |
