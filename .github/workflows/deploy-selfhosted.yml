@@ -35,6 +35,17 @@ jobs:
           cp /var/www/minecode/.env.production .env.production
           echo "✓ Copied .env.production from /var/www/minecode"
 
+      - name: Verify source files before Docker build
+        run: |
+          echo "=== Verifying FileTree.js ==="
+          grep -n "handleEmptyAreaClick" client/src/components/FileTree.js || echo "❌ handleEmptyAreaClick not found"
+          echo ""
+          echo "=== Verifying UploadModal.js ==="
+          grep -n "SelectButtonContainer" client/src/components/UploadModal.js || echo "❌ SelectButtonContainer not found"
+          echo ""
+          echo "=== Latest commit in workspace ==="
+          git log --oneline -1
+
       - name: Stop existing containers
         run: |
           # 既存のコンテナを名前で明示的に停止・削除
@@ -46,6 +57,35 @@ jobs:
         run: |
           docker-compose --env-file .env.production -f docker-compose.production.yml build --no-cache web
           docker-compose --env-file .env.production -f docker-compose.production.yml up -d
+
+      - name: Copy built files from container to Nginx directory
+        run: |
+          echo "=== Copying built files from Docker container to Nginx ==="
+          # コンテナからビルドファイルをコピー
+          docker cp minecode-app:/app/client/build /tmp/minecode-build-${GITHUB_RUN_ID}
+
+          # Nginxのディレクトリにコピー
+          sudo rm -rf /var/www/minecode/client/build/*
+          sudo cp -r /tmp/minecode-build-${GITHUB_RUN_ID}/* /var/www/minecode/client/build/
+
+          # パーミッション設定
+          sudo chown -R nginx:nginx /var/www/minecode/client/build
+          sudo chmod -R 755 /var/www/minecode/client/build
+
+          # 一時ファイル削除
+          rm -rf /tmp/minecode-build-${GITHUB_RUN_ID}
+
+          echo "✓ Built files copied to Nginx directory"
+
+      - name: Verify built files in Nginx directory
+        run: |
+          echo "=== Checking files in Nginx directory ==="
+          ls -lh /var/www/minecode/client/build/static/js/*.js | head -3
+
+      - name: Reload Nginx
+        run: |
+          sudo nginx -t && sudo systemctl reload nginx
+          echo "✓ Nginx reloaded"
 
       - name: Health check
         run: |
